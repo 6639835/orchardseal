@@ -21,6 +21,17 @@ void Logger::_Print(const char* szLog, int nColor) {
 
 #else
 
+    const auto writeToStdout = [](const char* data, size_t size) {
+        while (size > 0) {
+            const ssize_t written = write(STDOUT_FILENO, data, size);
+            if (written <= 0) {
+                return;
+            }
+            data += written;
+            size -= static_cast<size_t>(written);
+        }
+    };
+
     const char* szColor = NULL;
     switch (nColor) {
     case 6:
@@ -37,11 +48,11 @@ void Logger::_Print(const char* szLog, int nColor) {
     }
 
     if (NULL != szColor) {
-        write(STDOUT_FILENO, szColor, strlen(szColor));
+        writeToStdout(szColor, strlen(szColor));
     }
-    write(STDOUT_FILENO, szLog, strlen(szLog));
+    writeToStdout(szLog, strlen(szLog));
     if (NULL != szColor) {
-        write(STDOUT_FILENO, "\033[0m", 4);
+        writeToStdout("\033[0m", 4);
     }
 
 #endif

@@ -353,9 +353,9 @@ bool FileSystem::IsZipFile(const char* szFile) {
         _fopen64(fp, szFile, "rb");
         if (NULL != fp) {
             uint8_t buf[2] = {0};
-            fread(buf, 1, 2, fp);
+            const size_t bytesRead = fread(buf, 1, sizeof(buf), fp);
             fclose(fp);
-            return (0 == memcmp("PK", buf, 2));
+            return bytesRead == sizeof(buf) && (0 == memcmp("PK", buf, sizeof(buf)));
         }
     }
     return false;
