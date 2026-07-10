@@ -5,7 +5,6 @@
 - Confirm the intended version in `project(OrchardSeal VERSION ...)`.
 - Update `CHANGELOG.md` and any report-schema documentation.
 - Confirm no private keys, certificates, provisioning profiles, customer applications, or signed IPA files are present.
-- Review `THIRD_PARTY_NOTICES.md` when dependencies change.
 
 ## 2. Validate from a clean tree
 

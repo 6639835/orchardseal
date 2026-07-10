@@ -17,7 +17,7 @@ ctest --test-dir build/debug --output-on-failure
 - Keep signing, Mach-O, bundle, provisioning, certificate, and SealCheck logic in `src/core`.
 - Keep generic reusable infrastructure in `src/common`.
 - Keep Windows-only compatibility code under `src/platform/windows`.
-- Do not mix vendored zlib/minizip edits with OrchardSeal refactors.
+- Do not update the pinned zlib/minizip dependency alongside unrelated OrchardSeal refactors.
 
 ## Style
 

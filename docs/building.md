@@ -7,7 +7,7 @@
 - OpenSSL 3.x development package
 - Git for revision-aware version strings when building from a repository checkout
 
-OrchardSeal builds vendored zlib and minizip internally. Do not install separate copies unless you intentionally change the build configuration.
+OrchardSeal downloads the pinned zlib 1.3.1 source at its first CMake configure and builds zlib and its bundled minizip implementation internally. No separate zlib or minizip installation is required. CMake reuses the dependency from `FETCHCONTENT_BASE_DIR` (by default, the build directory's `_deps` folder); set that cache variable to a shared directory to reuse it across builds or prepare an offline build cache.
 
 ## Linux
 
@@ -55,7 +55,8 @@ ctest --test-dir build -C Release --output-on-failure
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `ORCHARDSEAL_BUILD_TESTS` | `ON` | Register CLI, unit, SealCheck, parser-safety, and archive-safety tests. |
-| `ORCHARDSEAL_WARNINGS_AS_ERRORS` | `OFF` | Promote warnings in OrchardSeal core and CLI code to errors. Vendored code is excluded. |
+| `ORCHARDSEAL_WARNINGS_AS_ERRORS` | `OFF` | Promote warnings in OrchardSeal core and CLI code to errors. Third-party code is excluded. |
+| `FETCHCONTENT_BASE_DIR` | Build-local `_deps` directory | Directory CMake uses to cache the pinned zlib source download. |
 | `CMAKE_BUILD_TYPE` | Generator-specific | Select `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` for single-config generators. |
 | `OPENSSL_ROOT_DIR` | Auto-detected | Point CMake at a non-default OpenSSL installation. |
 
@@ -90,7 +91,7 @@ Install into the selected CMake prefix:
 cmake --install build/release
 ```
 
-The install step includes the `orchardseal` executable plus the README, license, and third-party notices.
+The install step includes the `orchardseal` executable, README, and license.
 
 ## Sanitizer build
 

@@ -2,7 +2,7 @@
 
 ## Design goals
 
-OrchardSeal separates command handling, domain behavior, reusable infrastructure, and vendored dependencies so signing logic can evolve without turning the CLI into a second implementation of the core.
+OrchardSeal separates command handling, domain behavior, reusable infrastructure, and pinned third-party dependencies so signing logic can evolve without turning the CLI into a second implementation of the core.
 
 The main rules are:
 
@@ -10,7 +10,7 @@ The main rules are:
 - Mach-O, bundle, certificate, provisioning, and audit behavior belongs in `src/core`;
 - generic filesystem, archive, JSON, hashing, timing, and logging code belongs in `src/common`;
 - platform compatibility code remains isolated under `src/platform`;
-- vendored sources remain under `vendor` and are not reformatted with project code;
+- third-party source is fetched from the pinned upstream zlib release and is not reformatted with project code;
 - inspection paths are read-only and mutation paths are explicit;
 - resource-owning code uses deterministic cleanup and RAII where possible.
 
@@ -61,7 +61,7 @@ Common code must not depend on signing-specific types.
 
 ### Platform and vendor code
 
-Windows shims are compiled only on Windows. zlib and minizip are built as isolated static libraries. OpenSSL remains a system dependency discovered with CMake.
+Windows shims are compiled only on Windows. CMake downloads pinned zlib source and builds zlib plus its bundled minizip implementation as isolated static libraries. OpenSSL remains a system dependency discovered with CMake.
 
 ## SealCheck data flow
 
