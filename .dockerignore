@@ -1,0 +1,17 @@
+.git
+build
+bin
+dist
+install
+.orchardseal_cache
+.orchardseal_debug
+*.ipa
+*.p12
+*.mobileprovision
+*.pem
+*.cer
+*.key
+.cache
+.vscode
+.idea
+.DS_Store

@@ -1,0 +1,50 @@
+# Build outputs
+build/
+bin/
+dist/
+install/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.lib
+*.pdb
+*.dSYM/
+
+# Generated project files
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Tool caches
+.cache/
+.clangd/
+.xmake/
+.vs/
+.vscode/
+.idea/
+.DS_Store
+
+# OrchardSeal runtime output
+*.ipa
+.orchardseal_cache/
+.orchardseal_debug/
+
+# Local test materials; signing credentials should never be committed.
+tests/assets/
+tests/packages/
+tests/ipa/
+*.mobileprovision
+*.p12
+*.pem
+*.cer
+*.key
+
+# Misc
+CLAUDE.md
+.claude/
