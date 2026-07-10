@@ -10,6 +10,7 @@ option(ORCHARDSEAL_BUILD_TESTS "Build and register OrchardSeal tests" ON)
 option(ORCHARDSEAL_WARNINGS_AS_ERRORS "Treat project compiler warnings as errors" OFF)
 
 include(GNUInstallDirs)
+include(FetchContent)
 include(cmake/CompilerOptions.cmake)
 
 find_package(OpenSSL REQUIRED)
@@ -66,40 +67,54 @@ set(ORCHARDSEAL_CORE_SOURCES
     src/core/code_signature.cpp
 )
 
+FetchContent_Declare(
+    orchardseal_zlib
+    GIT_REPOSITORY https://github.com/madler/zlib.git
+    GIT_TAG v1.3.1
+    GIT_SHALLOW TRUE
+    # We compile only the required source files below, rather than adding
+    # zlib's CMake project and its targets to this build.
+    SOURCE_SUBDIR cmake/orchardseal-do-not-add
+)
+FetchContent_MakeAvailable(orchardseal_zlib)
+
 set(ORCHARDSEAL_ZLIB_SOURCES
-    vendor/zlib/adler32.c
-    vendor/zlib/compress.c
-    vendor/zlib/crc32.c
-    vendor/zlib/deflate.c
-    vendor/zlib/gzclose.c
-    vendor/zlib/gzlib.c
-    vendor/zlib/gzread.c
-    vendor/zlib/gzwrite.c
-    vendor/zlib/infback.c
-    vendor/zlib/inffast.c
-    vendor/zlib/inflate.c
-    vendor/zlib/inftrees.c
-    vendor/zlib/trees.c
-    vendor/zlib/uncompr.c
-    vendor/zlib/zutil.c
+    "${orchardseal_zlib_SOURCE_DIR}/adler32.c"
+    "${orchardseal_zlib_SOURCE_DIR}/compress.c"
+    "${orchardseal_zlib_SOURCE_DIR}/crc32.c"
+    "${orchardseal_zlib_SOURCE_DIR}/deflate.c"
+    "${orchardseal_zlib_SOURCE_DIR}/gzclose.c"
+    "${orchardseal_zlib_SOURCE_DIR}/gzlib.c"
+    "${orchardseal_zlib_SOURCE_DIR}/gzread.c"
+    "${orchardseal_zlib_SOURCE_DIR}/gzwrite.c"
+    "${orchardseal_zlib_SOURCE_DIR}/infback.c"
+    "${orchardseal_zlib_SOURCE_DIR}/inffast.c"
+    "${orchardseal_zlib_SOURCE_DIR}/inflate.c"
+    "${orchardseal_zlib_SOURCE_DIR}/inftrees.c"
+    "${orchardseal_zlib_SOURCE_DIR}/trees.c"
+    "${orchardseal_zlib_SOURCE_DIR}/uncompr.c"
+    "${orchardseal_zlib_SOURCE_DIR}/zutil.c"
 )
 
 set(ORCHARDSEAL_MINIZIP_SOURCES
-    vendor/minizip/ioapi.c
-    vendor/minizip/zip.c
-    vendor/minizip/unzip.c
+    "${orchardseal_zlib_SOURCE_DIR}/contrib/minizip/ioapi.c"
+    "${orchardseal_zlib_SOURCE_DIR}/contrib/minizip/zip.c"
+    "${orchardseal_zlib_SOURCE_DIR}/contrib/minizip/unzip.c"
 )
 
 if(WIN32)
-    list(APPEND ORCHARDSEAL_MINIZIP_SOURCES vendor/minizip/iowin32.c)
+    list(APPEND ORCHARDSEAL_MINIZIP_SOURCES "${orchardseal_zlib_SOURCE_DIR}/contrib/minizip/iowin32.c")
 endif()
 
 add_library(orchardseal_zlib STATIC ${ORCHARDSEAL_ZLIB_SOURCES})
-target_include_directories(orchardseal_zlib PUBLIC vendor/zlib)
+target_include_directories(orchardseal_zlib PUBLIC "${orchardseal_zlib_SOURCE_DIR}")
 set_target_properties(orchardseal_zlib PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+if(UNIX)
+    target_compile_definitions(orchardseal_zlib PRIVATE HAVE_UNISTD_H=1)
+endif()
 
 add_library(orchardseal_minizip STATIC ${ORCHARDSEAL_MINIZIP_SOURCES})
-target_include_directories(orchardseal_minizip PUBLIC vendor/minizip vendor/zlib)
+target_include_directories(orchardseal_minizip PUBLIC "${orchardseal_zlib_SOURCE_DIR}/contrib/minizip" "${orchardseal_zlib_SOURCE_DIR}")
 target_link_libraries(orchardseal_minizip PUBLIC orchardseal_zlib)
 set_target_properties(orchardseal_minizip PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
 
@@ -109,8 +124,8 @@ target_include_directories(orchardseal_core
     PUBLIC
         src/common
         src/core
-        vendor/minizip
-        vendor/zlib
+        "${orchardseal_zlib_SOURCE_DIR}/contrib/minizip"
+        "${orchardseal_zlib_SOURCE_DIR}"
     PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/generated/include"
 )
@@ -151,7 +166,7 @@ target_link_libraries(orchardseal PRIVATE orchardseal_core)
 
 install(TARGETS orchardseal RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(
-    FILES README.md LICENSE THIRD_PARTY_NOTICES.md
+    FILES README.md LICENSE
     DESTINATION "${CMAKE_INSTALL_DOCDIR}"
 )
 
