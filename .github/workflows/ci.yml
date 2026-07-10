@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     name: Linux / Release / warnings-as-errors
@@ -82,3 +86,64 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  static-analysis:
+    name: Linux / clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache CMake dependencies
+        uses: actions/cache@v4
+        with:
+          path: .cache/cmake-fetchcontent
+          key: ${{ runner.os }}-cmake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang clang-tidy pkg-config libssl-dev
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_CLANG_TIDY=clang-tidy
+          -DORCHARDSEAL_BUILD_TESTS=ON
+          -DORCHARDSEAL_WARNINGS_AS_ERRORS=ON
+          -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.cache/cmake-fetchcontent
+      - name: Run clang-tidy
+        run: cmake --build build --parallel
+
+  sanitizers:
+    name: Linux / ASan + UBSan
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache CMake dependencies
+        uses: actions/cache@v4
+        with:
+          path: .cache/cmake-fetchcontent
+          key: ${{ runner.os }}-cmake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config libssl-dev
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer"
+          "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined
+          -DORCHARDSEAL_BUILD_TESTS=ON
+          -DORCHARDSEAL_WARNINGS_AS_ERRORS=ON
+          -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.cache/cmake-fetchcontent
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

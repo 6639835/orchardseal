@@ -29,13 +29,20 @@ build/release-final/orchardseal --audit --audit-format json \
 
 Run private signing integration tests with authorized assets outside the repository.
 
-## 3. Package
+## 3. Package and publish
+
+Pushing an annotated `vX.Y.Z` tag triggers the release workflow. It validates the
+tag against `project(OrchardSeal VERSION ...)`, builds with warnings treated as
+errors, runs CTest, creates the source archive and checksum, and publishes both
+to the GitHub release.
+
+You can still inspect a package locally before tagging:
 
 ```bash
 scripts/package.sh X.Y.Z
 ```
 
-Inspect the resulting archive and `.sha256` file. Ensure the archive contains source, documentation, tests, and license files but no build directory or sensitive material.
+Ensure the archive contains source, documentation, tests, and license files but no build directory or sensitive material.
 
 ## 4. Tag and publish
 
@@ -44,7 +51,7 @@ git tag -a vX.Y.Z -m "OrchardSeal X.Y.Z"
 git push origin vX.Y.Z
 ```
 
-Publish checksums alongside release archives. Document any JSON schema change, new issue code, signing-output change, or supported-platform change in the release notes.
+The workflow publishes checksums alongside release archives. Document any JSON schema change, new issue code, signing-output change, or supported-platform change in the release notes before pushing the tag.
 
 ## Compatibility rules
 

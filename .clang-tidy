@@ -11,7 +11,6 @@ Checks: >
   portability-*
 WarningsAsErrors: ''
 HeaderFilterRegex: 'src/(cli|common|core)/.*'
-AnalyzeTemporaryDtors: false
 CheckOptions:
   - key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor
     value: true

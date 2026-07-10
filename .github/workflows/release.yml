@@ -1,0 +1,59 @@
+name: OrchardSeal Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate, package, and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ pkg-config libssl-dev
+      - name: Verify tag version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          project_version="$(sed -nE 's/^[[:space:]]*VERSION[[:space:]]+([0-9]+(\.[0-9]+)+).*/\1/p' CMakeLists.txt | head -n 1)"
+          test -n "$project_version"
+          test "$tag_version" = "$project_version"
+      - name: Configure
+        run: >-
+          cmake -S . -B build/release
+          -DCMAKE_BUILD_TYPE=Release
+          -DORCHARDSEAL_BUILD_TESTS=ON
+          -DORCHARDSEAL_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build/release --parallel
+      - name: Test
+        run: ctest --test-dir build/release --output-on-failure
+      - name: Package source archive
+        run: scripts/package.sh "${GITHUB_REF_NAME#v}"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          files=("dist/OrchardSeal-${version}.tar.gz" "dist/OrchardSeal-${version}.tar.gz.sha256")
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --generate-notes \
+              --title "OrchardSeal ${version}"
+          fi
