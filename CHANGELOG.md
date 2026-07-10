@@ -2,7 +2,7 @@
 
 All notable OrchardSeal changes are documented here.
 
-## 1.0.0 - 2026-07-10
+## 0.1.0 - 2026-07-10
 
 ### Product launch
 

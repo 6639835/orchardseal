@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 
 project(OrchardSeal
-    VERSION 1.0.0
+    VERSION 0.1.0
     DESCRIPTION "Cross-platform iOS signing and SealCheck preflight audit toolkit"
     LANGUAGES C CXX
 )
@@ -27,7 +27,6 @@ if(Git_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         ERROR_QUIET
     )
     if(ORCHARDSEAL_GIT_DESCRIBE)
-        string(REGEX REPLACE "^v" "" ORCHARDSEAL_VERSION_STRING "${ORCHARDSEAL_GIT_DESCRIBE}")
         set(ORCHARDSEAL_GIT_REVISION "${ORCHARDSEAL_GIT_DESCRIBE}")
     endif()
 endif()
