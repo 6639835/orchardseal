@@ -18,50 +18,43 @@
 
 namespace {
 
-constexpr std::uint32_t kFatSliceAlignment = 16U * 1024U;
-constexpr std::uint32_t kFatSliceAlignmentExponent = 14U;
+    constexpr std::uint32_t kFatSliceAlignment = 16U * 1024U;
+    constexpr std::uint32_t kFatSliceAlignmentExponent = 14U;
 
-void RemoveFiles(const std::vector<std::string>& paths)
-{
-    for (const std::string& path : paths) {
-        FileSystem::RemoveFile(path.c_str());
+    void RemoveFiles(const std::vector<std::string>& paths) {
+        for (const std::string& path : paths) {
+            FileSystem::RemoveFile(path.c_str());
+        }
     }
-}
 
 } // namespace
 
-MachOFile::~MachOFile()
-{
+MachOFile::~MachOFile() {
     CloseFile();
 }
 
-bool MachOFile::Init(const char* file)
-{
+bool MachOFile::Init(const char* file) {
     filePath_ = file == nullptr ? std::string() : file;
     codeSignatureReallocated_ = false;
     return OpenFile(file, false);
 }
 
-bool MachOFile::InitReadOnly(const char* file)
-{
+bool MachOFile::InitReadOnly(const char* file) {
     filePath_ = file == nullptr ? std::string() : file;
     codeSignatureReallocated_ = false;
     return OpenFile(file, true);
 }
 
-bool MachOFile::InitV(const char* path, ...)
-{
+bool MachOFile::InitV(const char* path, ...) {
     FORMAT_V(path, file);
     return Init(file);
 }
 
-bool MachOFile::Free()
-{
+bool MachOFile::Free() {
     return CloseFile();
 }
 
-bool MachOFile::NewSlice(std::uint8_t* base, std::uint32_t length)
-{
+bool MachOFile::NewSlice(std::uint8_t* base, std::uint32_t length) {
     auto slice = std::make_unique<MachOSlice>();
     if (!slice->Init(base, length)) {
         return false;
@@ -70,8 +63,7 @@ bool MachOFile::NewSlice(std::uint8_t* base, std::uint32_t length)
     return true;
 }
 
-bool MachOFile::OpenFile(const char* path, bool readOnly)
-{
+bool MachOFile::OpenFile(const char* path, bool readOnly) {
     CloseFile();
     if (path == nullptr || *path == '\0') {
         return false;
@@ -130,8 +122,7 @@ bool MachOFile::OpenFile(const char* path, bool readOnly)
     return !slices_.empty();
 }
 
-bool MachOFile::CloseFile()
-{
+bool MachOFile::CloseFile() {
     slices_.clear();
     if (mappedData_ == nullptr || mappedSize_ == 0) {
         mappedData_ = nullptr;
@@ -142,7 +133,8 @@ bool MachOFile::CloseFile()
 
     const bool unmapped = FileSystem::UnmapFile(mappedData_, mappedSize_);
     if (!unmapped) {
-        Logger::ErrorV(">>> Failed to unmap Mach-O file: %p, %zu, %s\n", mappedData_, mappedSize_, std::strerror(errno));
+        Logger::ErrorV(">>> Failed to unmap Mach-O file: %p, %zu, %s\n", mappedData_, mappedSize_,
+                       std::strerror(errno));
     }
     mappedData_ = nullptr;
     mappedSize_ = 0;
@@ -150,8 +142,7 @@ bool MachOFile::CloseFile()
     return unmapped;
 }
 
-bool MachOFile::ReplaceAndReopen(const std::string& temporaryFile)
-{
+bool MachOFile::ReplaceAndReopen(const std::string& temporaryFile) {
     if (temporaryFile.empty() || filePath_.empty() || !CloseFile()) {
         return false;
     }
@@ -183,22 +174,18 @@ bool MachOFile::ReplaceAndReopen(const std::string& temporaryFile)
     return false;
 }
 
-void MachOFile::PrintInfo()
-{
+void MachOFile::PrintInfo() {
     for (const auto& slice : slices_) {
         slice->PrintInfo();
     }
 }
 
-bool MachOFile::CheckSignature() const
-{
-    return !slices_.empty() && std::all_of(slices_.cbegin(), slices_.cend(), [](const auto& slice) {
-               return slice->IsSigned();
-           });
+bool MachOFile::CheckSignature() const {
+    return !slices_.empty() &&
+           std::all_of(slices_.cbegin(), slices_.cend(), [](const auto& slice) { return slice->IsSigned(); });
 }
 
-std::vector<MachOSliceInfo> MachOFile::GetArchitectureInfo() const
-{
+std::vector<MachOSliceInfo> MachOFile::GetArchitectureInfo() const {
     std::vector<MachOSliceInfo> result;
     result.reserve(slices_.size());
     for (const auto& slice : slices_) {
@@ -207,13 +194,8 @@ std::vector<MachOSliceInfo> MachOFile::GetArchitectureInfo() const
     return result;
 }
 
-bool MachOFile::Sign(SigningAsset* signingAsset,
-                     bool force,
-                     std::string bundleId,
-                     std::string infoSha1,
-                     std::string infoSha256,
-                     const std::string& codeResourcesData)
-{
+bool MachOFile::Sign(SigningAsset* signingAsset, bool force, std::string bundleId, std::string infoSha1,
+                     std::string infoSha256, const std::string& codeResourcesData) {
     if (mappedData_ == nullptr || slices_.empty() || readOnly_) {
         return false;
     }
@@ -251,8 +233,7 @@ bool MachOFile::Sign(SigningAsset* signingAsset,
     return CloseFile();
 }
 
-bool MachOFile::ReallocateCodeSignatureSpace()
-{
+bool MachOFile::ReallocateCodeSignatureSpace() {
     if (readOnly_ || mappedData_ == nullptr || slices_.empty()) {
         return false;
     }
@@ -285,7 +266,7 @@ bool MachOFile::ReallocateCodeSignatureSpace()
     }
 
     const std::size_t architectureCount = slices_.size();
-    fat_header fatHeader {};
+    fat_header fatHeader{};
     std::memcpy(&fatHeader, mappedData_, sizeof(fatHeader));
     const std::uint32_t rawArchitectureCount =
         fatHeader.magic == FAT_MAGIC ? fatHeader.nfat_arch : LE(fatHeader.nfat_arch);
@@ -295,9 +276,7 @@ bool MachOFile::ReallocateCodeSignatureSpace()
     }
 
     std::vector<fat_arch> architectures(architectureCount);
-    std::memcpy(architectures.data(),
-                mappedData_ + sizeof(fat_header),
-                sizeof(fat_arch) * architectureCount);
+    std::memcpy(architectures.data(), mappedData_ + sizeof(fat_header), sizeof(fat_arch) * architectureCount);
 
     const std::uint32_t headerSize =
         static_cast<std::uint32_t>(sizeof(fat_header) + sizeof(fat_arch) * architectureCount);
@@ -344,9 +323,9 @@ bool MachOFile::ReallocateCodeSignatureSpace()
 
         const std::size_t alignedSize = Utility::ByteAlign(sliceSizes[index], kFatSliceAlignment);
         const std::string padding(alignedSize - mappedSliceSize, '\0');
-        assembled = FileSystem::AppendFile(
-                        fatOutputFile.c_str(), static_cast<const char*>(sliceData), mappedSliceSize) &&
-                    FileSystem::AppendFile(fatOutputFile.c_str(), padding);
+        assembled =
+            FileSystem::AppendFile(fatOutputFile.c_str(), static_cast<const char*>(sliceData), mappedSliceSize) &&
+            FileSystem::AppendFile(fatOutputFile.c_str(), padding);
         FileSystem::UnmapFile(sliceData, mappedSliceSize);
         if (!assembled) {
             break;
@@ -364,8 +343,7 @@ bool MachOFile::ReallocateCodeSignatureSpace()
     return replaced;
 }
 
-bool MachOFile::InjectDylib(bool weakInject, const char* dylibFile)
-{
+bool MachOFile::InjectDylib(bool weakInject, const char* dylibFile) {
     if (readOnly_ || mappedData_ == nullptr || slices_.empty()) {
         return false;
     }
@@ -381,8 +359,7 @@ bool MachOFile::InjectDylib(bool weakInject, const char* dylibFile)
     return true;
 }
 
-void MachOFile::RemoveDylibs(const std::set<std::string>& dylibs)
-{
+void MachOFile::RemoveDylibs(const std::set<std::string>& dylibs) {
     if (readOnly_ || mappedData_ == nullptr) {
         return;
     }

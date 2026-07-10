@@ -6,8 +6,7 @@
 
 #include <cstdio>
 
-int main(int argc, char* argv[])
-{
+int main(int argc, char* argv[]) {
     const auto parsed = orchardseal::cli::CommandLineOptions::Parse(argc, argv);
 
     switch (parsed.status) {

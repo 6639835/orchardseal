@@ -22,83 +22,78 @@
 
 namespace {
 
-constexpr std::uint64_t kMaximumEntryPathLength = 64U * 1024U;
-constexpr std::size_t kExtractionBufferSize = 512U * 1024U;
+    constexpr std::uint64_t kMaximumEntryPathLength = 64U * 1024U;
+    constexpr std::size_t kExtractionBufferSize = 512U * 1024U;
 
-bool IsArchivePathSafe(const std::string& path)
-{
-    if (path.empty() || path.front() == '/' || path.front() == '\\') {
-        return false;
-    }
-    if (path.size() >= 2U && std::isalpha(static_cast<unsigned char>(path[0])) != 0 && path[1] == ':') {
-        return false;
-    }
-
-    std::size_t componentStart = 0;
-    while (componentStart < path.size()) {
-        const std::size_t separator = path.find('/', componentStart);
-        const std::size_t componentEnd = separator == std::string::npos ? path.size() : separator;
-        if (componentEnd == componentStart) {
+    bool IsArchivePathSafe(const std::string& path) {
+        if (path.empty() || path.front() == '/' || path.front() == '\\') {
+            return false;
+        }
+        if (path.size() >= 2U && std::isalpha(static_cast<unsigned char>(path[0])) != 0 && path[1] == ':') {
             return false;
         }
 
-        const std::string component = path.substr(componentStart, componentEnd - componentStart);
-        if (component == "." || component == ".." || component.find(':') != std::string::npos ||
-            component.back() == '.' || component.back() == ' ') {
-            return false;
-        }
-        for (const unsigned char character : component) {
-            if (character == 0U || character < 0x20U || character == 0x7FU) {
+        std::size_t componentStart = 0;
+        while (componentStart < path.size()) {
+            const std::size_t separator = path.find('/', componentStart);
+            const std::size_t componentEnd = separator == std::string::npos ? path.size() : separator;
+            if (componentEnd == componentStart) {
                 return false;
             }
-        }
 
-        if (separator == std::string::npos) {
-            return true;
+            const std::string component = path.substr(componentStart, componentEnd - componentStart);
+            if (component == "." || component == ".." || component.find(':') != std::string::npos ||
+                component.back() == '.' || component.back() == ' ') {
+                return false;
+            }
+            for (const unsigned char character : component) {
+                if (character == 0U || character < 0x20U || character == 0x7FU) {
+                    return false;
+                }
+            }
+
+            if (separator == std::string::npos) {
+                return true;
+            }
+            componentStart = separator + 1U;
         }
-        componentStart = separator + 1U;
+        return false;
     }
-    return false;
-}
 
-std::string EntryIdentity(std::string path)
-{
+    std::string EntryIdentity(std::string path) {
 #ifdef _WIN32
-    std::transform(path.begin(), path.end(), path.begin(), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
+        std::transform(path.begin(), path.end(), path.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
 #endif
-    return path;
-}
-
-std::string RelativeArchivePath(const std::string& root, const std::string& path)
-{
-    if (path.size() <= root.size()) {
-        return {};
+        return path;
     }
 
-    std::size_t offset = root.size();
-    while (offset < path.size() && (path[offset] == '/' || path[offset] == '\\')) {
-        ++offset;
+    std::string RelativeArchivePath(const std::string& root, const std::string& path) {
+        if (path.size() <= root.size()) {
+            return {};
+        }
+
+        std::size_t offset = root.size();
+        while (offset < path.size() && (path[offset] == '/' || path[offset] == '\\')) {
+            ++offset;
+        }
+        std::string relative = path.substr(offset);
+        Utility::StringReplace(relative, "\\", "/");
+        return relative;
     }
-    std::string relative = path.substr(offset);
-    Utility::StringReplace(relative, "\\", "/");
-    return relative;
-}
 
 } // namespace
 
-void ZipArchive::GetModificationTime(const char* path, void* zipFileInfo)
-{
+void ZipArchive::GetModificationTime(const char* path, void* zipFileInfo) {
     auto* info = static_cast<zip_fileinfo*>(zipFileInfo);
-    *info = zip_fileinfo {};
+    *info = zip_fileinfo{};
 
-    struct stat status {};
+    struct stat status{};
     if (stat(path, &status) != 0) {
         return;
     }
 
-    struct tm localTime {};
+    struct tm localTime{};
 #ifdef _WIN32
     if (localtime_s(&localTime, &status.st_mtime) != 0) {
         return;
@@ -116,11 +111,8 @@ void ZipArchive::GetModificationTime(const char* path, void* zipFileInfo)
     info->tmz_date.tm_year = localTime.tm_year + 1900;
 }
 
-bool ZipArchive::AddFile(void* archive,
-                         const std::string& sourceFile,
-                         const std::string& relativePath,
-                         int compressionLevel)
-{
+bool ZipArchive::AddFile(void* archive, const std::string& sourceFile, const std::string& relativePath,
+                         int compressionLevel) {
     FILE* input = nullptr;
     _fopen64(input, sourceFile.c_str(), "rb");
     if (input == nullptr) {
@@ -128,25 +120,11 @@ bool ZipArchive::AddFile(void* archive,
         return false;
     }
 
-    zip_fileinfo info {};
+    zip_fileinfo info{};
     GetModificationTime(sourceFile.c_str(), &info);
-    const int openResult = zipOpenNewFileInZip3_64(archive,
-                                                   relativePath.c_str(),
-                                                   &info,
-                                                   nullptr,
-                                                   0,
-                                                   nullptr,
-                                                   0,
-                                                   nullptr,
-                                                   Z_DEFLATED,
-                                                   compressionLevel,
-                                                   0,
-                                                   -MAX_WBITS,
-                                                   DEF_MEM_LEVEL,
-                                                   0,
-                                                   nullptr,
-                                                   0,
-                                                   0);
+    const int openResult =
+        zipOpenNewFileInZip3_64(archive, relativePath.c_str(), &info, nullptr, 0, nullptr, 0, nullptr, Z_DEFLATED,
+                                compressionLevel, 0, -MAX_WBITS, DEF_MEM_LEVEL, 0, nullptr, 0, 0);
     if (openResult != ZIP_OK) {
         std::fclose(input);
         Logger::ErrorV(">>> ZipArchive: Could not add file: %s\n", relativePath.c_str());
@@ -174,41 +152,21 @@ bool ZipArchive::AddFile(void* archive,
     return success;
 }
 
-bool ZipArchive::AddDirectory(void* archive,
-                              const std::string& sourceDirectory,
-                              const std::string& relativePath,
-                              int compressionLevel)
-{
-    zip_fileinfo info {};
+bool ZipArchive::AddDirectory(void* archive, const std::string& sourceDirectory, const std::string& relativePath,
+                              int compressionLevel) {
+    zip_fileinfo info{};
     GetModificationTime(sourceDirectory.c_str(), &info);
-    if (zipOpenNewFileInZip3_64(archive,
-                                relativePath.c_str(),
-                                &info,
-                                nullptr,
-                                0,
-                                nullptr,
-                                0,
-                                nullptr,
-                                Z_DEFLATED,
-                                compressionLevel,
-                                0,
-                                -MAX_WBITS,
-                                DEF_MEM_LEVEL,
-                                0,
-                                nullptr,
-                                0,
-                                0) != ZIP_OK) {
+    if (zipOpenNewFileInZip3_64(archive, relativePath.c_str(), &info, nullptr, 0, nullptr, 0, nullptr, Z_DEFLATED,
+                                compressionLevel, 0, -MAX_WBITS, DEF_MEM_LEVEL, 0, nullptr, 0, 0) != ZIP_OK) {
         Logger::ErrorV(">>> ZipArchive: Could not add directory: %s\n", relativePath.c_str());
         return false;
     }
     return zipCloseFileInZip(archive) == ZIP_OK;
 }
 
-bool ZipArchive::Archive(const std::string& folder, const std::string& archiveFile, int compressionLevel)
-{
+bool ZipArchive::Archive(const std::string& folder, const std::string& archiveFile, int compressionLevel) {
     if (compressionLevel < 0 || compressionLevel > 9 || !FileSystem::IsFolder(folder.c_str())) {
-        Logger::ErrorV(">>> ZipArchive: Invalid source folder or compression level: %s (%d)\n",
-                       folder.c_str(),
+        Logger::ErrorV(">>> ZipArchive: Invalid source folder or compression level: %s (%d)\n", folder.c_str(),
                        compressionLevel);
         return false;
     }
@@ -220,8 +178,8 @@ bool ZipArchive::Archive(const std::string& folder, const std::string& archiveFi
     }
 
     bool success = true;
-    const bool enumerated = FileSystem::EnumFolder(
-        folder.c_str(), true, nullptr, [&](bool directory, const std::string& path) {
+    const bool enumerated =
+        FileSystem::EnumFolder(folder.c_str(), true, nullptr, [&](bool directory, const std::string& path) {
             std::string relativePath = RelativeArchivePath(folder, path);
             if (relativePath.empty()) {
                 success = false;
@@ -248,14 +206,13 @@ bool ZipArchive::Archive(const std::string& folder, const std::string& archiveFi
     return enumerated && success;
 }
 
-bool ZipArchive::EnumerateEntries(const char* archiveFile, const EntryCallback& callback)
-{
+bool ZipArchive::EnumerateEntries(const char* archiveFile, const EntryCallback& callback) {
     unzFile archive = unzOpen64(archiveFile);
     if (archive == nullptr) {
         return false;
     }
 
-    unz_global_info64 globalInfo {};
+    unz_global_info64 globalInfo{};
     if (unzGetGlobalInfo64(archive, &globalInfo) != UNZ_OK) {
         unzClose(archive);
         return false;
@@ -263,7 +220,7 @@ bool ZipArchive::EnumerateEntries(const char* archiveFile, const EntryCallback& 
 
     bool success = true;
     for (std::uint64_t index = 0; index < globalInfo.number_entry; ++index) {
-        unz_file_info64 fileInfo {};
+        unz_file_info64 fileInfo{};
         if (unzGetCurrentFileInfo64(archive, &fileInfo, nullptr, 0, nullptr, 0, nullptr, 0) != UNZ_OK ||
             fileInfo.size_filename == 0 || fileInfo.size_filename > kMaximumEntryPathLength) {
             success = false;
@@ -271,14 +228,8 @@ bool ZipArchive::EnumerateEntries(const char* archiveFile, const EntryCallback& 
         }
 
         std::vector<char> pathBuffer(static_cast<std::size_t>(fileInfo.size_filename) + 1U, '\0');
-        if (unzGetCurrentFileInfo64(archive,
-                                    &fileInfo,
-                                    pathBuffer.data(),
-                                    static_cast<uLong>(pathBuffer.size()),
-                                    nullptr,
-                                    0,
-                                    nullptr,
-                                    0) != UNZ_OK) {
+        if (unzGetCurrentFileInfo64(archive, &fileInfo, pathBuffer.data(), static_cast<uLong>(pathBuffer.size()),
+                                    nullptr, 0, nullptr, 0) != UNZ_OK) {
             success = false;
             break;
         }
@@ -310,8 +261,7 @@ bool ZipArchive::EnumerateEntries(const char* archiveFile, const EntryCallback& 
     return success;
 }
 
-bool ZipArchive::ExtractEntry(void* archive, const std::string& path, const std::string& outputFolder)
-{
+bool ZipArchive::ExtractEntry(void* archive, const std::string& path, const std::string& outputFolder) {
     const std::string outputFile = outputFolder + "/" + path;
     std::string parentDirectory = outputFile;
     if (!FileSystem::PathRemoveFileSpec(parentDirectory) || !FileSystem::CreateFolder(parentDirectory.c_str())) {
@@ -355,8 +305,7 @@ bool ZipArchive::ExtractEntry(void* archive, const std::string& path, const std:
     return success;
 }
 
-bool ZipArchive::ExtractEntries(const char* archiveFile, const char* outputFolder)
-{
+bool ZipArchive::ExtractEntries(const char* archiveFile, const char* outputFolder) {
     std::set<std::string> seenEntries;
     return EnumerateEntries(archiveFile, [&](void* archive, bool directory, const std::string& path) {
         if (!IsArchivePathSafe(path)) {
@@ -375,8 +324,7 @@ bool ZipArchive::ExtractEntries(const char* archiveFile, const char* outputFolde
     });
 }
 
-bool ZipArchive::Extract(const char* archiveFile, const char* outputFolder)
-{
+bool ZipArchive::Extract(const char* archiveFile, const char* outputFolder) {
     if (archiveFile == nullptr || outputFolder == nullptr || *archiveFile == '\0' || *outputFolder == '\0') {
         return false;
     }

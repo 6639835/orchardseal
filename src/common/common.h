@@ -27,9 +27,12 @@
 #include <sys/mman.h>
 #include <sys/time.h>
 
-#define _fopen64(fp, path, mode) {fp = fopen(path, mode); }
-#define _fseeki64	fseeko
-#define _ftelli64	ftello
+#define _fopen64(fp, path, mode)                                                                                       \
+    {                                                                                                                  \
+        fp = fopen(path, mode);                                                                                        \
+    }
+#define _fseeki64 fseeko
+#define _ftelli64 ftello
 
 #endif
 
@@ -44,11 +47,12 @@
 #include <functional>
 using namespace std;
 
-#define FORMAT_V(x, format) char format[1024] = { 0 }; \
-                        	va_list va_args; \
-							va_start(va_args, x); \
-							vsnprintf(format, 1024, x, va_args); \
-							va_end(va_args);
+#define FORMAT_V(x, format)                                                                                            \
+    char format[1024] = {0};                                                                                           \
+    va_list va_args;                                                                                                   \
+    va_start(va_args, x);                                                                                              \
+    vsnprintf(format, 1024, x, va_args);                                                                               \
+    va_end(va_args);
 
 #include "file_system.h"
 #include "hash.h"

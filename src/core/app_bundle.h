@@ -8,54 +8,55 @@
 
 class MachOFile;
 
-enum DylibInjectionScope
-{
-	DYLIB_INJECT_ROOT = 1 << 0,
-	DYLIB_INJECT_EXTENSIONS = 1 << 1,
-	DYLIB_INJECT_FRAMEWORKS = 1 << 2,
-	DYLIB_INJECT_FILES = 1 << 3,
-	DYLIB_INJECT_ALL = DYLIB_INJECT_ROOT | DYLIB_INJECT_EXTENSIONS | DYLIB_INJECT_FRAMEWORKS | DYLIB_INJECT_FILES
+enum DylibInjectionScope {
+    DYLIB_INJECT_ROOT = 1 << 0,
+    DYLIB_INJECT_EXTENSIONS = 1 << 1,
+    DYLIB_INJECT_FRAMEWORKS = 1 << 2,
+    DYLIB_INJECT_FILES = 1 << 3,
+    DYLIB_INJECT_ALL = DYLIB_INJECT_ROOT | DYLIB_INJECT_EXTENSIONS | DYLIB_INJECT_FRAMEWORKS | DYLIB_INJECT_FILES
 };
 
 class AppBundle {
-public:
+  public:
     AppBundle() = default;
 
-    void SetDylibInjectScope(std::uint32_t scope) noexcept { dylibInjectionScope_ = scope; }
-    void SetEnableDocuments(bool enabled) noexcept { enableDocuments_ = enabled; }
-    void SetMinimumVersion(const string& version) { minimumVersion_ = version; }
-    void SetRemoveExtensions(bool remove) noexcept { removeExtensions_ = remove; }
-    void SetRemoveWatchApp(bool remove) noexcept { removeWatchApp_ = remove; }
-    void SetRemoveUiSupportedDevices(bool remove) noexcept { removeUiSupportedDevices_ = remove; }
-    void SetIconFile(const string& path) { iconFile_ = path; }
+    void SetDylibInjectScope(std::uint32_t scope) noexcept {
+        dylibInjectionScope_ = scope;
+    }
+    void SetEnableDocuments(bool enabled) noexcept {
+        enableDocuments_ = enabled;
+    }
+    void SetMinimumVersion(const string& version) {
+        minimumVersion_ = version;
+    }
+    void SetRemoveExtensions(bool remove) noexcept {
+        removeExtensions_ = remove;
+    }
+    void SetRemoveWatchApp(bool remove) noexcept {
+        removeWatchApp_ = remove;
+    }
+    void SetRemoveUiSupportedDevices(bool remove) noexcept {
+        removeUiSupportedDevices_ = remove;
+    }
+    void SetIconFile(const string& path) {
+        iconFile_ = path;
+    }
 
-    [[nodiscard]] const string& AppFolder() const noexcept { return appFolder_; }
+    [[nodiscard]] const string& AppFolder() const noexcept {
+        return appFolder_;
+    }
 
-    bool SignFolder(SigningAsset* signingAsset,
-                    const string& folder,
-                    const string& bundleId,
-                    const string& bundleVersion,
-                    const string& displayName,
-                    const vector<string>& dylibFiles,
-                    const vector<string>& dylibsToRemove,
-                    bool force,
-                    bool weakInject,
-                    bool enableCache,
+    bool SignFolder(SigningAsset* signingAsset, const string& folder, const string& bundleId,
+                    const string& bundleVersion, const string& displayName, const vector<string>& dylibFiles,
+                    const vector<string>& dylibsToRemove, bool force, bool weakInject, bool enableCache,
                     bool removeProvision = false);
 
-    bool SignFolder(list<SigningAsset>* signingAssets,
-                    const string& folder,
-                    const string& bundleId,
-                    const string& bundleVersion,
-                    const string& displayName,
-                    const vector<string>& dylibFiles,
-                    const vector<string>& dylibsToRemove,
-                    bool force,
-                    bool weakInject,
-                    bool enableCache,
+    bool SignFolder(list<SigningAsset>* signingAssets, const string& folder, const string& bundleId,
+                    const string& bundleVersion, const string& displayName, const vector<string>& dylibFiles,
+                    const vector<string>& dylibsToRemove, bool force, bool weakInject, bool enableCache,
                     bool removeProvision = false);
 
-private:
+  private:
     bool SignNode(jvalue& node);
     void GetNodeChangedFiles(jvalue& node);
     void GetChangedFiles(jvalue& node, vector<string>& changedFiles);
@@ -63,9 +64,7 @@ private:
     bool ModifyBundleInfo(const string& bundleId, const string& bundleVersion, const string& displayName);
     bool ReplaceBundleIcons(const string& iconFile);
     bool ShouldInjectDylibsIntoNode(jvalue& node);
-    bool InjectDylibsIntoTarget(MachOFile& macho,
-                                const string& targetFolder,
-                                bool useLoaderPath,
+    bool InjectDylibsIntoTarget(MachOFile& macho, const string& targetFolder, bool useLoaderPath,
                                 vector<string>& copiedDylibs);
     bool SignCopiedDylibs(const vector<string>& copiedDylibs);
 

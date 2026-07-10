@@ -19,16 +19,13 @@ struct MachOSliceInfo {
 };
 
 class MachOSlice final {
-public:
+  public:
     MachOSlice() = default;
 
     [[nodiscard]] bool Init(std::uint8_t* base, std::uint32_t length);
 
-    [[nodiscard]] bool Sign(SigningAsset* signingAsset,
-                            bool force,
-                            const std::string& bundleId,
-                            const std::string& infoSha1,
-                            const std::string& infoSha256,
+    [[nodiscard]] bool Sign(SigningAsset* signingAsset, bool force, const std::string& bundleId,
+                            const std::string& infoSha1, const std::string& infoSha256,
                             const std::string& codeResourcesData);
 
     void PrintInfo();
@@ -39,24 +36,30 @@ public:
     void RemoveDylibs(const std::set<std::string>& dylibs);
     [[nodiscard]] std::uint32_t ReallocCodeSignSpace(const std::string& newFile);
 
-    [[nodiscard]] const std::string& InfoPlist() const noexcept { return infoPlist_; }
-    [[nodiscard]] bool HasEnoughCodeSignatureSpace() const noexcept { return hasEnoughSpace_; }
-    [[nodiscard]] std::uint8_t* SignatureData() noexcept { return signatureBase_; }
-    [[nodiscard]] const std::uint8_t* SignatureData() const noexcept { return signatureBase_; }
-    [[nodiscard]] std::uint32_t SignatureSize() const noexcept { return signatureLength_; }
+    [[nodiscard]] const std::string& InfoPlist() const noexcept {
+        return infoPlist_;
+    }
+    [[nodiscard]] bool HasEnoughCodeSignatureSpace() const noexcept {
+        return hasEnoughSpace_;
+    }
+    [[nodiscard]] std::uint8_t* SignatureData() noexcept {
+        return signatureBase_;
+    }
+    [[nodiscard]] const std::uint8_t* SignatureData() const noexcept {
+        return signatureBase_;
+    }
+    [[nodiscard]] std::uint32_t SignatureSize() const noexcept {
+        return signatureLength_;
+    }
 
-private:
+  private:
     [[nodiscard]] std::uint32_t ByteOrder(std::uint32_t value) const;
     [[nodiscard]] std::uint64_t ByteOrder64(std::uint64_t value) const;
     [[nodiscard]] const char* GetFileType(std::uint32_t fileType) const;
     [[nodiscard]] const char* GetArchitecture(int cpuType, int cpuSubType) const;
-    [[nodiscard]] bool BuildCodeSignature(SigningAsset* signingAsset,
-                                          bool force,
-                                          const std::string& bundleId,
-                                          const std::string& infoSha1,
-                                          const std::string& infoSha256,
-                                          const std::string& codeResourcesSha1,
-                                          const std::string& codeResourcesSha256,
+    [[nodiscard]] bool BuildCodeSignature(SigningAsset* signingAsset, bool force, const std::string& bundleId,
+                                          const std::string& infoSha1, const std::string& infoSha256,
+                                          const std::string& codeResourcesSha1, const std::string& codeResourcesSha256,
                                           std::string& output);
 
     std::uint8_t* base_ = nullptr;

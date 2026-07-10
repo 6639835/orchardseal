@@ -9,22 +9,20 @@
 
 namespace {
 
-bool ExpectEqual(std::string_view actual, std::string_view expected, std::string_view label)
-{
-    if (actual == expected) {
-        return true;
-    }
+    bool ExpectEqual(std::string_view actual, std::string_view expected, std::string_view label) {
+        if (actual == expected) {
+            return true;
+        }
 
-    std::cerr << label << " failed: expected '" << expected << "', got '" << actual << "'\n";
-    return false;
-}
+        std::cerr << label << " failed: expected '" << expected << "', got '" << actual << "'\n";
+        return false;
+    }
 
 } // namespace
 
-int main()
-{
+int main() {
     Base64Codec codec;
-    const std::array<std::pair<std::string_view, std::string_view>, 7> vectors {{
+    const std::array<std::pair<std::string_view, std::string_view>, 7> vectors{{
         {"", ""},
         {"f", "Zg=="},
         {"fo", "Zm8="},
@@ -42,14 +40,12 @@ int main()
         int decodedLength = -1;
         const char* decoded = codec.Decode(encoded.data(), static_cast<int>(encoded.size()), &decodedLength);
         if (decodedLength != static_cast<int>(plain.size()) ||
-            !ExpectEqual(std::string_view(decoded, static_cast<std::size_t>(decodedLength)),
-                         plain,
-                         "decode vector")) {
+            !ExpectEqual(std::string_view(decoded, static_cast<std::size_t>(decodedLength)), plain, "decode vector")) {
             return 1;
         }
     }
 
-    const std::string binary {"\0\x01\x7f\xff", 4};
+    const std::string binary{"\0\x01\x7f\xff", 4};
     const char* firstResult = codec.Encode(binary);
     const std::string firstCopy = firstResult;
     (void)codec.Encode("another value");

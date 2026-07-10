@@ -22,9 +22,12 @@
 #include "windows_text_converter.h"
 #include "getopt.h"
 
-#define PATH_MAX					4096
-#define strerror(x)					#x
-#define _fopen64(fp, path, mode)	{ fopen_s(&fp, path, mode); }
+#define PATH_MAX 4096
+#define strerror(x) #x
+#define _fopen64(fp, path, mode)                                                                                       \
+    {                                                                                                                  \
+        fopen_s(&fp, path, mode);                                                                                      \
+    }
 
 #ifdef _M_ARM64
 #pragma comment(lib, "../lib/openssl/arm64/mt/libssl.lib")

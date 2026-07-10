@@ -6,7 +6,7 @@
 #include "json.h"
 
 class SigningAsset final {
-public:
+  public:
     SigningAsset() = default;
     ~SigningAsset();
 
@@ -15,29 +15,38 @@ public:
     SigningAsset(SigningAsset&& other) noexcept;
     SigningAsset& operator=(SigningAsset&& other) noexcept;
 
-    [[nodiscard]] bool Init(const std::string& certificateFile,
-                            const std::string& privateKeyFile,
-                            const std::string& provisioningFile,
-                            const std::string& entitlementsFile,
-                            const std::string& password,
-                            bool adhoc,
-                            bool sha256Only,
-                            bool singleBinary);
+    [[nodiscard]] bool Init(const std::string& certificateFile, const std::string& privateKeyFile,
+                            const std::string& provisioningFile, const std::string& entitlementsFile,
+                            const std::string& password, bool adhoc, bool sha256Only, bool singleBinary);
 
-    [[nodiscard]] bool GenerateCMS(const std::string& codeDirectoryHashes,
-                                   const std::string& codeDirectoryHashesPlist,
+    [[nodiscard]] bool GenerateCMS(const std::string& codeDirectoryHashes, const std::string& codeDirectoryHashesPlist,
                                    const std::string& codeDirectorySha1,
-                                   const std::string& alternateCodeDirectorySha256,
-                                   std::string& output);
+                                   const std::string& alternateCodeDirectorySha256, std::string& output);
 
-    [[nodiscard]] bool IsAdHoc() const noexcept { return adhoc_; }
-    [[nodiscard]] bool Sha256Only() const noexcept { return sha256Only_; }
-    [[nodiscard]] bool SingleBinary() const noexcept { return singleBinary_; }
-    [[nodiscard]] const std::string& TeamId() const noexcept { return teamId_; }
-    [[nodiscard]] const std::string& SubjectCommonName() const noexcept { return subjectCommonName_; }
-    [[nodiscard]] const std::string& ProvisioningData() const noexcept { return provisioningData_; }
-    [[nodiscard]] const std::string& EntitlementsData() const noexcept { return entitlementsData_; }
-    [[nodiscard]] const std::string& ApplicationIdentifier() const noexcept { return applicationIdentifier_; }
+    [[nodiscard]] bool IsAdHoc() const noexcept {
+        return adhoc_;
+    }
+    [[nodiscard]] bool Sha256Only() const noexcept {
+        return sha256Only_;
+    }
+    [[nodiscard]] bool SingleBinary() const noexcept {
+        return singleBinary_;
+    }
+    [[nodiscard]] const std::string& TeamId() const noexcept {
+        return teamId_;
+    }
+    [[nodiscard]] const std::string& SubjectCommonName() const noexcept {
+        return subjectCommonName_;
+    }
+    [[nodiscard]] const std::string& ProvisioningData() const noexcept {
+        return provisioningData_;
+    }
+    [[nodiscard]] const std::string& EntitlementsData() const noexcept {
+        return entitlementsData_;
+    }
+    [[nodiscard]] const std::string& ApplicationIdentifier() const noexcept {
+        return applicationIdentifier_;
+    }
 
     static bool CMSError();
     // Returns the embedded WWDR intermediate (G1-G8) whose subject-name hash
@@ -61,14 +70,10 @@ public:
     static const char* s_szAppleDevCACertG7;
     static const char* s_szAppleDevCACertG8;
 
-private:
-    [[nodiscard]] bool GenerateCMS(void* certificate,
-                                   void* privateKey,
-                                   const std::string& codeDirectoryHashes,
-                                   const std::string& codeDirectoryHashesPlist,
-                                   const std::string& codeDirectorySha1,
-                                   const std::string& alternateCodeDirectorySha256,
-                                   std::string& output);
+  private:
+    [[nodiscard]] bool GenerateCMS(void* certificate, void* privateKey, const std::string& codeDirectoryHashes,
+                                   const std::string& codeDirectoryHashesPlist, const std::string& codeDirectorySha1,
+                                   const std::string& alternateCodeDirectorySha256, std::string& output);
 
     bool GetCertSubjectCN(void* certificate, std::string& subjectCommonName);
     bool GetCertSubjectCN(const std::string& certificateData, std::string& subjectCommonName);
@@ -88,7 +93,7 @@ private:
     void* certificateChain_ = nullptr; // STACK_OF(X509)* recovered from PKCS#12 input.
 
     class OpenSSLInit {
-    public:
+      public:
         OpenSSLInit();
     };
     static OpenSSLInit s_OpenSSLInit;

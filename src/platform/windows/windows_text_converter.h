@@ -4,7 +4,7 @@
 #include <string>
 
 class WindowsTextConverter final {
-public:
+  public:
     WindowsTextConverter() = default;
     ~WindowsTextConverter() = default;
 
@@ -16,7 +16,7 @@ public:
     [[nodiscard]] const char* Utf8ToAnsi(const char* value);
     [[nodiscard]] const char* Utf8ToAnsi(const std::string& value);
 
-private:
+  private:
     [[nodiscard]] const wchar_t* MultiByteToWide(const char* value, unsigned int codePage);
     [[nodiscard]] const char* WideToMultiByte(const wchar_t* value, unsigned int codePage);
 

@@ -10,7 +10,7 @@
 #include <vector>
 
 class MachOFile {
-public:
+  public:
     MachOFile() = default;
     ~MachOFile();
 
@@ -26,16 +26,12 @@ public:
     void PrintInfo();
     [[nodiscard]] bool CheckSignature() const;
     [[nodiscard]] std::vector<MachOSliceInfo> GetArchitectureInfo() const;
-    bool Sign(SigningAsset* signingAsset,
-              bool force,
-              std::string bundleId,
-              std::string infoSha1,
-              std::string infoSha256,
-              const std::string& codeResourcesData);
+    bool Sign(SigningAsset* signingAsset, bool force, std::string bundleId, std::string infoSha1,
+              std::string infoSha256, const std::string& codeResourcesData);
     bool InjectDylib(bool weakInject, const char* dylibFile);
     void RemoveDylibs(const std::set<std::string>& dylibs);
 
-private:
+  private:
     bool OpenFile(const char* path, bool readOnly);
     bool CloseFile();
     bool ReplaceAndReopen(const std::string& temporaryFile);
