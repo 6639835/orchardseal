@@ -1,29 +1,42 @@
 #include "hash.h"
 #include "base64.h"
-#include <openssl/sha.h>
 
-bool Hash::SHA1(uint8_t* data, size_t size, string& strOutput) {
-    strOutput.clear();
-    uint8_t hash[20];
-    ::SHA1(data, size, hash);
-    strOutput.append((const char*)hash, 20);
-    return true;
+#include <array>
+#include <openssl/evp.h>
+
+namespace {
+    bool Digest(const EVP_MD* algorithm, const uint8_t* data, size_t size, size_t expectedSize, string& output) {
+        output.clear();
+        if (algorithm == nullptr || (data == nullptr && size != 0)) {
+            return false;
+        }
+        std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+        unsigned int digestSize = 0;
+        if (!context || EVP_DigestInit_ex(context.get(), algorithm, nullptr) != 1 ||
+            EVP_DigestUpdate(context.get(), data, size) != 1 ||
+            EVP_DigestFinal_ex(context.get(), digest.data(), &digestSize) != 1 || digestSize != expectedSize) {
+            return false;
+        }
+        output.assign(reinterpret_cast<const char*>(digest.data()), digestSize);
+        return true;
+    }
+} // namespace
+
+bool Hash::SHA1(const uint8_t* data, size_t size, string& strOutput) {
+    return Digest(EVP_sha1(), data, size, 20, strOutput);
 }
 
-bool Hash::SHA256(uint8_t* data, size_t size, string& strOutput) {
-    strOutput.clear();
-    uint8_t hash[32];
-    ::SHA256(data, size, hash);
-    strOutput.append((const char*)hash, 32);
-    return true;
+bool Hash::SHA256(const uint8_t* data, size_t size, string& strOutput) {
+    return Digest(EVP_sha256(), data, size, 32, strOutput);
 }
 
 bool Hash::SHA1(const string& strData, string& strOutput) {
-    return Hash::SHA1((uint8_t*)strData.data(), strData.size(), strOutput);
+    return Hash::SHA1(reinterpret_cast<const uint8_t*>(strData.data()), strData.size(), strOutput);
 }
 
 bool Hash::SHA256(const string& strData, string& strOutput) {
-    return Hash::SHA256((uint8_t*)strData.data(), strData.size(), strOutput);
+    return Hash::SHA256(reinterpret_cast<const uint8_t*>(strData.data()), strData.size(), strOutput);
 }
 
 bool Hash::SHA(const string& strData, string& strSHA1, string& strSHA256) {
@@ -89,9 +102,10 @@ bool Hash::SHAFile(const char* szFile, string& strSHA1, string& strSHA256) {
     }
 #endif
 
-    SHA_CTX sha1Context{};
-    SHA256_CTX sha256Context{};
-    if (::SHA1_Init(&sha1Context) != 1 || ::SHA256_Init(&sha256Context) != 1) {
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> sha1Context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> sha256Context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!sha1Context || !sha256Context || EVP_DigestInit_ex(sha1Context.get(), EVP_sha1(), nullptr) != 1 ||
+        EVP_DigestInit_ex(sha256Context.get(), EVP_sha256(), nullptr) != 1) {
 #ifdef _WIN32
         CloseHandle(input);
 #else
@@ -120,8 +134,8 @@ bool Hash::SHAFile(const char* szFile, string& strSHA1, string& strSHA256) {
         }
         const size_t count = static_cast<size_t>(readResult);
 #endif
-        if (count > 0 &&
-            (::SHA1_Update(&sha1Context, buffer, count) != 1 || ::SHA256_Update(&sha256Context, buffer, count) != 1)) {
+        if (count > 0 && (EVP_DigestUpdate(sha1Context.get(), buffer, count) != 1 ||
+                          EVP_DigestUpdate(sha256Context.get(), buffer, count) != 1)) {
             success = false;
             break;
         }
@@ -139,13 +153,16 @@ bool Hash::SHAFile(const char* szFile, string& strSHA1, string& strSHA256) {
     }
 #endif
 
-    uint8_t sha1[SHA_DIGEST_LENGTH];
-    uint8_t sha256[SHA256_DIGEST_LENGTH];
-    if (!success || ::SHA1_Final(sha1, &sha1Context) != 1 || ::SHA256_Final(sha256, &sha256Context) != 1) {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> sha1{};
+    std::array<unsigned char, EVP_MAX_MD_SIZE> sha256{};
+    unsigned int sha1Size = 0;
+    unsigned int sha256Size = 0;
+    if (!success || EVP_DigestFinal_ex(sha1Context.get(), sha1.data(), &sha1Size) != 1 || sha1Size != 20 ||
+        EVP_DigestFinal_ex(sha256Context.get(), sha256.data(), &sha256Size) != 1 || sha256Size != 32) {
         return false;
     }
-    strSHA1.assign(reinterpret_cast<const char*>(sha1), sizeof(sha1));
-    strSHA256.assign(reinterpret_cast<const char*>(sha256), sizeof(sha256));
+    strSHA1.assign(reinterpret_cast<const char*>(sha1.data()), sha1Size);
+    strSHA256.assign(reinterpret_cast<const char*>(sha256.data()), sha256Size);
     return true;
 }
 
