@@ -1,10 +1,12 @@
 #include "macho_slice.h"
+#include "code_signature.h"
 #include "utility.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -63,7 +65,8 @@ namespace {
             return false;
         }
 
-        slice.RemoveDylibs(std::set<std::string>{kRemovePath});
+        if (!slice.RemoveDylibs(std::set<std::string>{kRemovePath}))
+            return false;
 
         header = reinterpret_cast<mach_header_64*>(image.data());
         if (Decode(header->ncmds, bigEndian) != 1U || Decode(header->sizeofcmds, bigEndian) != keptCommandSize) {
@@ -96,8 +99,56 @@ namespace {
         return true;
     }
 
+    bool RunDerIntegerCases() {
+        struct Case {
+            std::int64_t value;
+            std::vector<std::uint8_t> expected;
+        };
+        const std::vector<Case> cases = {
+            {0, {0x02, 0x01, 0x00}},  {127, {0x02, 0x01, 0x7f}},        {128, {0x02, 0x02, 0x00, 0x80}},
+            {-1, {0x02, 0x01, 0xff}}, {-129, {0x02, 0x02, 0xff, 0x7f}},
+        };
+        for (const Case& test : cases) {
+            const std::string encoded = CodeSignature::_DER(jvalue(test.value));
+            if (encoded.size() != test.expected.size() ||
+                !std::equal(
+                    encoded.begin(), encoded.end(), test.expected.begin(),
+                    [](char actual, std::uint8_t expected) { return static_cast<std::uint8_t>(actual) == expected; })) {
+                std::cerr << "non-canonical DER INTEGER for " << test.value << "\n";
+                return false;
+            }
+        }
+        std::string unsupported;
+        if (CodeSignature::_DERChecked(jvalue(1.5), unsupported) ||
+            CodeSignature::SlotBuildDerEntitlements("not a plist", unsupported)) {
+            std::cerr << "unsupported or malformed DER entitlements were accepted\n";
+            return false;
+        }
+        return true;
+    }
+
+    bool RunMalformedSuperBlobCases() {
+        std::vector<std::uint8_t> blob(sizeof(CS_SuperBlob), 0);
+        auto* header = reinterpret_cast<CS_SuperBlob*>(blob.data());
+        header->magic = Utility::Swap(static_cast<std::uint32_t>(CSMAGIC_EMBEDDED_SIGNATURE));
+        header->length = Utility::Swap(static_cast<std::uint32_t>(blob.size()));
+        header->count = Utility::Swap(std::numeric_limits<std::uint32_t>::max());
+        if (CodeSignature::ParseCodeSignature(blob.data(), static_cast<std::uint32_t>(blob.size()))) {
+            std::cerr << "accepted overflowing superblob index count\n";
+            return false;
+        }
+        header->count = 0;
+        header->length = Utility::Swap(static_cast<std::uint32_t>(blob.size() + 1));
+        if (CodeSignature::ParseCodeSignature(blob.data(), static_cast<std::uint32_t>(blob.size()))) {
+            std::cerr << "accepted superblob length beyond LC_CODE_SIGNATURE capacity\n";
+            return false;
+        }
+        return true;
+    }
+
 } // namespace
 
 int main() {
-    return RunRemovalCase(false) && RunRemovalCase(true) ? 0 : 1;
+    return RunRemovalCase(false) && RunRemovalCase(true) && RunDerIntegerCases() && RunMalformedSuperBlobCases() ? 0
+                                                                                                                 : 1;
 }

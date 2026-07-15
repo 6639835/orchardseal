@@ -6,10 +6,12 @@ The public suite is intentionally credential-free and uses synthetic or non-sens
 
 - `orchardseal.base64`: validates standard vectors, binary round trips, tolerant decoding, and stable result storage.
 - `orchardseal.macho-slice`: validates bounded dylib-command removal and reparsing for little- and big-endian Mach-O images.
+- `orchardseal.common-safety`: validates archive permission, symlink, self-inclusion, hash, plist/JSON, Unicode, and argv-only process boundaries.
 - `orchardseal.version`: verifies the public version entry point.
 - `orchardseal.help`: verifies CLI help generation.
+- `orchardseal.cli-contract`: verifies operand rejection, password redaction, stream isolation, color suppression, and stable operational exit behavior.
 - `orchardseal.audit-smoke`: exercises Mach-O, `.app`, and `.ipa` SealCheck paths; text/JSON behavior; saved reports; and strict exit code `3`.
-- `orchardseal.archive-safety`: verifies that a traversal archive is rejected, cannot write outside its extraction root, and leaves no partial workspace.
+- `orchardseal.archive-safety`: verifies that traversal and extreme-compression-ratio archives are rejected, cannot write outside the extraction root, and leave no partial workspace.
 - `orchardseal.malformed-macho`: rejects an invalid load-command table and verifies the audit fails safely.
 
 Run:
@@ -43,3 +45,7 @@ tests/ipa/*.ipa
 ```
 
 Never commit those files. The platform scripts under `tests/fixtures/*/` accept environment-variable overrides for private test environments.
+
+They require at least one IPA, write every result to an isolated temporary
+directory, verify that a non-empty output was produced, aggregate failures, and
+return nonzero when inputs, assets, or outputs are missing.

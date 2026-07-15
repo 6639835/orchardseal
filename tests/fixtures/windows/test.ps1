@@ -11,16 +11,41 @@ if (-not (Test-Path $ORCHARDSEAL_BIN)) {
     exit 1
 }
 
-Get-ChildItem -Path $PACKAGES -Filter "*.ipa" -ErrorAction SilentlyContinue | ForEach-Object {
-    $file = $_.FullName
-    Write-Host "$file : " -NoNewline
-
-    & $ORCHARDSEAL_BIN -q -U -k $PRIVATE_KEY -m $MOBILE_PROVISION $file *> $null
-    $exitCode = $LASTEXITCODE
-
-    if ($exitCode -eq 0) {
-        Write-Host -ForegroundColor Green "OK."
-    } else {
-        Write-Host -ForegroundColor Red "FAILED."
-    }
+if (-not (Test-Path -PathType Leaf $PRIVATE_KEY) -or -not (Test-Path -PathType Leaf $MOBILE_PROVISION)) {
+    Write-Error "private signing assets not found; set PRIVATE_KEY and MOBILE_PROVISION"
+    exit 1
 }
+
+$inputs = @(Get-ChildItem -Path $PACKAGES -Filter "*.ipa" -File -ErrorAction SilentlyContinue)
+if ($inputs.Count -eq 0) {
+    Write-Error "no IPA inputs found in $PACKAGES"
+    exit 1
+}
+
+$outputDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("orchardseal-windows-signing-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $outputDirectory -ErrorAction Stop | Out-Null
+$failed = $false
+
+try {
+    foreach ($inputFile in $inputs) {
+        $file = $inputFile.FullName
+        $outputFile = Join-Path $outputDirectory $inputFile.Name
+        Write-Host "$file : " -NoNewline
+
+        & $ORCHARDSEAL_BIN -q -U -k $PRIVATE_KEY -m $MOBILE_PROVISION -o $outputFile $file *> $null
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -eq 0 -and (Test-Path -PathType Leaf $outputFile) -and
+            (Get-Item $outputFile).Length -gt 0) {
+            Write-Host -ForegroundColor Green "OK."
+        } else {
+            Write-Host -ForegroundColor Red "FAILED."
+            $failed = $true
+        }
+    }
+} finally {
+    Remove-Item -Recurse -Force $outputDirectory -ErrorAction SilentlyContinue
+}
+
+if ($failed) { exit 1 }
+exit 0
