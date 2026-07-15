@@ -72,9 +72,17 @@ temp_root="$(mktemp -d "$out_dir/.orchardseal-package.XXXXXX")"
 trap 'rm -rf "$temp_root"' EXIT HUP INT TERM
 temporary_archive="$temp_root/${package_name}.tar.gz"
 temporary_checksum="${temporary_archive}.sha256"
+deterministic_gzip="$temp_root/deterministic-gzip"
 
 git -C "$root_dir" archive --format=tar --prefix="${package_name}/" HEAD > "$temp_root/source.tar"
-gzip -n -9 < "$temp_root/source.tar" > "$temporary_archive"
+
+IFS=' ' read -r -a cxx_command <<< "${CXX:-c++}"
+if [[ "${#cxx_command[@]}" -eq 0 ]] || ! command -v "${cxx_command[0]}" >/dev/null 2>&1; then
+    echo "A C++17 compiler is required to create deterministic source packages." >&2
+    exit 1
+fi
+"${cxx_command[@]}" -std=c++17 -O2 "$script_dir/deterministic_gzip.cpp" -o "$deterministic_gzip"
+"$deterministic_gzip" "$temp_root/source.tar" "$temporary_archive"
 
 digest="$(openssl dgst -sha256 "$temporary_archive" | awk '{print $NF}')"
 printf '%s  %s\n' "$digest" "$(basename "$archive")" > "$temporary_checksum"
