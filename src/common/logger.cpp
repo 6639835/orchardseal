@@ -26,14 +26,15 @@ void Logger::_Write(const char* szLog, int nColor, bool toStandardError) {
     SetLastError(ERROR_SUCCESS);
     const DWORD noColorLength = GetEnvironmentVariableW(L"NO_COLOR", nullptr, 0);
     const bool noColor = noColorLength != 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND;
-    const bool useColor = nColor > 0 && !noColor && isConsole;
+    const bool useColor = nColor > 0 && static_cast<unsigned int>(nColor) <= std::numeric_limits<WORD>::max() &&
+                          !noColor && isConsole;
     WORD originalAttributes = 7;
     CONSOLE_SCREEN_BUFFER_INFO consoleInfo{};
     if (isConsole && GetConsoleScreenBufferInfo(hConsole, &consoleInfo) != 0) {
         originalAttributes = consoleInfo.wAttributes;
     }
     if (useColor) {
-        ::SetConsoleTextAttribute(hConsole, nColor);
+        ::SetConsoleTextAttribute(hConsole, static_cast<WORD>(nColor));
     }
 
     if (isConsole) {

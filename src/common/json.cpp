@@ -3310,7 +3310,7 @@ void jpwriter::_serialize_object_size(string& data, jpreader::bplist_object_type
             data.append((const char*)&type, sizeof(type));
             return;
         } else {
-            uint8_t type = object_type | 0x0F;
+            uint8_t type = static_cast<uint8_t>(static_cast<unsigned int>(object_type) | 0x0fU);
             data.append((const char*)&type, sizeof(type));
         }
     }
@@ -3453,7 +3453,8 @@ int64_t jpwriter::_write_value_to_binary(const jvalue& pval, vector<bplist_objec
         }
     } else if (pval.is_bool()) {
         object.type = jpreader::BPLIST_NULL;
-        uint8_t type = jpreader::BPLIST_NULL | (pval.as_bool() ? jpreader::NS_NUMBER_TRUE : jpreader::NS_NUMBER_FALSE);
+        uint8_t type = static_cast<uint8_t>(jpreader::BPLIST_NULL |
+                                            (pval.as_bool() ? jpreader::NS_NUMBER_TRUE : jpreader::NS_NUMBER_FALSE));
         object.data.append((const char*)&type, 1);
     } else if (pval.is_int()) {
         object.type = jpreader::NS_NUMBER_INT;

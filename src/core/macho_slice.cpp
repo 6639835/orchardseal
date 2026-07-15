@@ -304,10 +304,10 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
                     const std::uint32_t indexEnd =
                         static_cast<std::uint32_t>(sizeof(CS_SuperBlob) + blobCount * sizeof(CS_BlobIndex));
                     for (std::uint32_t blob = 0; blob < blobCount; ++blob) {
-                        CS_BlobIndex index{};
-                        std::memcpy(&index, signatureBase_ + sizeof(CS_SuperBlob) + blob * sizeof(index),
-                                    sizeof(index));
-                        const std::uint32_t slotOffset = LE(index.offset);
+                        CS_BlobIndex blobIndex{};
+                        std::memcpy(&blobIndex, signatureBase_ + sizeof(CS_SuperBlob) + blob * sizeof(blobIndex),
+                                    sizeof(blobIndex));
+                        const std::uint32_t slotOffset = LE(blobIndex.offset);
                         if (slotOffset < indexEnd || slotOffset > embeddedLength || embeddedLength - slotOffset < 8)
                             return false;
                         std::uint32_t encodedSlotLength = 0;

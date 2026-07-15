@@ -103,7 +103,7 @@ bool AppBundle::FindAppFolder(const string& strFolder, string& strAppFolder) {
 
     FileSystem::EnumFolder(
         strFolder.c_str(), true,
-        [&](bool bFolder, const string& strPath) {
+        [&](bool, const string& strPath) {
             string strName = Utility::GetBaseName(strPath.c_str());
             if ("__MACOSX" == strName) {
                 return true;

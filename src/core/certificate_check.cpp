@@ -1255,7 +1255,7 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
 
 // ─── display (simple text, matches orchardseal style) ──────────────────────
 
-static void PrintCertInfo(X509* cert, const string& fileTypeStr, bool showSigned, bool isSigned) {
+static void PrintCertInfo(X509* cert, bool showSigned, bool isSigned) {
     string cn = GetNameField(X509_get_subject_name(cert), NID_commonName);
     string org = GetNameField(X509_get_subject_name(cert), NID_organizationName);
     string ou = GetNameField(X509_get_subject_name(cert), NID_organizationalUnitName);
@@ -1382,7 +1382,7 @@ int CheckCertificate(const string& strFilePath, const string& strPassword) {
         return -1;
     }
 
-    PrintCertInfo(cert, fileTypeStr, showSigned, isSigned);
+    PrintCertInfo(cert, showSigned, isSigned);
 
     bool expired = !IsCurrentlyValid(cert);
 
