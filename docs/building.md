@@ -2,10 +2,10 @@
 
 ## Requirements
 
-- CMake 3.18+
+- CMake 3.25+
 - C99 and C++17 compilers
 - OpenSSL 3.x development package
-- Git for revision-aware version strings when building from a repository checkout
+- Git for the pinned zlib source download and revision-aware version strings
 
 OrchardSeal downloads the pinned zlib 1.3.1 source at its first CMake configure and builds zlib and its bundled minizip implementation internally. No separate zlib or minizip installation is required. CMake reuses the dependency from `FETCHCONTENT_BASE_DIR` (by default, the build directory's `_deps` folder); set that cache variable to a shared directory to reuse it across builds or prepare an offline build cache.
 
@@ -13,7 +13,7 @@ OrchardSeal downloads the pinned zlib 1.3.1 source at its first CMake configure 
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake g++ pkg-config libssl-dev
+sudo apt-get install -y cmake g++ git pkg-config libssl-dev
 
 cmake -S . -B build/release \
   -DCMAKE_BUILD_TYPE=Release \
@@ -26,7 +26,7 @@ ctest --test-dir build/release --output-on-failure
 ## macOS
 
 ```bash
-brew install cmake openssl@3
+brew install cmake git openssl@3
 
 cmake -S . -B build/release \
   -DCMAKE_BUILD_TYPE=Release \
@@ -38,13 +38,18 @@ ctest --test-dir build/release --output-on-failure
 
 ## Windows
 
-Install Visual Studio 2022, CMake, and OpenSSL through vcpkg:
+Install Visual Studio 2022 and CMake. Check out vcpkg at the project-pinned
+commit, then install OpenSSL:
 
 ```powershell
-vcpkg install openssl:x64-windows
+$VcpkgRoot = Join-Path $PWD ".cache/vcpkg"
+git clone https://github.com/microsoft/vcpkg.git $VcpkgRoot
+git -C $VcpkgRoot checkout 120deac3062162151622ca4860575a33844ba10b
+& "$VcpkgRoot/bootstrap-vcpkg.bat" -disableMetrics
+& "$VcpkgRoot/vcpkg.exe" install openssl:x64-windows
 
 cmake -S . -B build -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DCMAKE_TOOLCHAIN_FILE="$VcpkgRoot/scripts/buildsystems/vcpkg.cmake" `
   -DORCHARDSEAL_BUILD_TESTS=ON
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
@@ -74,7 +79,7 @@ cmake --build --preset release
 ctest --preset release
 ```
 
-The provided presets use Unix Makefiles. Visual Studio users should use the explicit Windows commands above or add a local user preset.
+The provided schema-6 presets require CMake 3.25 and use Unix Makefiles. Visual Studio users should use the explicit Windows commands above or add a local user preset.
 
 ## Convenience scripts
 
@@ -112,6 +117,6 @@ ctest --test-dir build/asan --output-on-failure
 ## Troubleshooting
 
 - **OpenSSL not found:** set `OPENSSL_ROOT_DIR` or the vcpkg toolchain file.
-- **JSON output mixed with diagnostics:** do not enable `--debug` when consuming standard output as a machine stream; `--audit-report` is the safest integration path.
+- **JSON output and diagnostics:** audit reports are written to standard output; diagnostics and debug logs are written to standard error. Redirect the streams independently in automation.
 - **IPA audit cannot create temporary files:** pass an existing writable directory with `--temp_folder`.
 - **Signing assets fail validation:** run `--audit` with the same `-k`, `-c`, `-m`, `-p`, and `-e` arguments to receive normalized findings before signing.

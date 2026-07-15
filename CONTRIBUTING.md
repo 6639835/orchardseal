@@ -2,6 +2,9 @@
 
 ## Development build
 
+Development requires CMake 3.25 or newer. Git is also required because the
+pinned zlib source is fetched from its immutable upstream commit.
+
 ```bash
 cmake -S . -B build/debug \
   -DCMAKE_BUILD_TYPE=Debug \

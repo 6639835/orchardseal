@@ -5,6 +5,7 @@
 - Confirm the intended version in `project(OrchardSeal VERSION ...)`.
 - Update `CHANGELOG.md` and any report-schema documentation.
 - Confirm no private keys, certificates, provisioning profiles, customer applications, or signed IPA files are present.
+- Commit every intended release change. Packaging refuses dirty trees and archives `HEAD` only.
 
 ## 2. Validate from a clean tree
 
@@ -32,9 +33,12 @@ Run private signing integration tests with authorized assets outside the reposit
 ## 3. Package and publish
 
 Pushing an annotated `vX.Y.Z` tag triggers the release workflow. It validates the
-tag against `project(OrchardSeal VERSION ...)`, builds with warnings treated as
-errors, runs CTest, creates the source archive and checksum, and publishes both
-to the GitHub release.
+tag against `project(OrchardSeal VERSION ...)` and the matching `CHANGELOG.md`
+heading, builds with warnings treated as errors, runs CTest, creates the source
+archive and checksum from tracked files at that exact commit, and publishes both
+to the GitHub release. The matching changelog section is the release-note source
+of truth and is applied consistently when a workflow run creates or updates the
+release.
 
 You can still inspect a package locally before tagging:
 
@@ -42,7 +46,8 @@ You can still inspect a package locally before tagging:
 scripts/package.sh X.Y.Z
 ```
 
-Ensure the archive contains source, documentation, tests, and license files but no build directory or sensitive material.
+The packager uses a source allowlist, rejects credential-like tracked files, and
+never includes ignored or untracked data. Inspect the archive before tagging.
 
 ## 4. Tag and publish
 

@@ -100,6 +100,12 @@ Reports use schema version `1.0` and include product metadata, summary counts, s
 
 `--audit-format` controls standard output. `--audit-report PATH` always writes the full JSON representation and implies `--audit`.
 
+Standard output is reserved for requested reports, help, and version output.
+Operational diagnostics go to standard error. Colors are emitted only for an
+interactive terminal and can be disabled with the `NO_COLOR` environment
+variable, so redirected JSON and logs remain clean machine streams. Debug option
+logging always redacts `--password` values.
+
 ## Signing usage
 
 ```text
@@ -151,22 +157,23 @@ Supply multiple provisioning profiles for nested bundles by repeating `-m`. Run 
 
 ### Requirements
 
-- CMake 3.18 or newer
+- CMake 3.25 or newer
 - A C99 compiler and a C++17 compiler
 - OpenSSL 3.x development headers and libraries
 - A CMake-supported build tool
+- Git (required for the pinned source dependency and revision metadata)
 
 Linux dependencies:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake g++ pkg-config libssl-dev
+sudo apt-get install -y cmake g++ git pkg-config libssl-dev
 ```
 
 macOS dependencies:
 
 ```bash
-brew install cmake openssl@3
+brew install cmake git openssl@3
 ```
 
 Configure, build, and test:
