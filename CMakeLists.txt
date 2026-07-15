@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.25)
 
 project(OrchardSeal
     VERSION 0.2.0
@@ -36,6 +36,13 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/orchardseal/version.h"
     @ONLY
 )
+if(WIN32)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/orchardseal.manifest.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/orchardseal.manifest"
+        @ONLY
+    )
+endif()
 
 set(ORCHARDSEAL_COMMON_SOURCES
     src/common/zip_archive.cpp
@@ -69,8 +76,9 @@ set(ORCHARDSEAL_CORE_SOURCES
 FetchContent_Declare(
     orchardseal_zlib
     GIT_REPOSITORY https://github.com/madler/zlib.git
-    GIT_TAG v1.3.1
-    GIT_SHALLOW TRUE
+    # Pin the immutable commit behind v1.3.1. Release tags are convenient for
+    # humans but are mutable Git references and therefore not reproducible.
+    GIT_TAG 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
     # We compile only the required source files below, rather than adding
     # zlib's CMake project and its targets to this build.
     SOURCE_SUBDIR cmake/orchardseal-do-not-add
@@ -162,6 +170,12 @@ if(WIN32)
     target_include_directories(orchardseal PRIVATE src/platform/windows)
 endif()
 target_link_libraries(orchardseal PRIVATE orchardseal_core)
+if(MSVC)
+    target_link_options(orchardseal PRIVATE
+        "/MANIFEST:EMBED"
+        "/MANIFESTINPUT:${CMAKE_CURRENT_BINARY_DIR}/orchardseal.manifest"
+    )
+endif()
 
 install(TARGETS orchardseal RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(
@@ -180,10 +194,22 @@ if(ORCHARDSEAL_BUILD_TESTS)
     orchardseal_apply_default_options(orchardseal_macho_slice_test)
     target_link_libraries(orchardseal_macho_slice_test PRIVATE orchardseal_core)
 
+    add_executable(orchardseal_common_safety_test tests/unit/common_safety_test.cpp)
+    orchardseal_apply_default_options(orchardseal_common_safety_test)
+    target_link_libraries(orchardseal_common_safety_test PRIVATE orchardseal_core)
+
     add_test(NAME orchardseal.base64 COMMAND orchardseal_base64_test)
     add_test(NAME orchardseal.macho-slice COMMAND orchardseal_macho_slice_test)
+    add_test(NAME orchardseal.common-safety COMMAND orchardseal_common_safety_test)
     add_test(NAME orchardseal.version COMMAND orchardseal --version)
     add_test(NAME orchardseal.help COMMAND orchardseal --help)
+    add_test(
+        NAME orchardseal.cli-contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DORCHARDSEAL_BIN=$<TARGET_FILE:orchardseal>"
+            "-DFIXTURE_BINARY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/macho/arm64-executable"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/cli_contract.cmake"
+    )
     add_test(
         NAME orchardseal.audit-smoke
         COMMAND "${CMAKE_COMMAND}"

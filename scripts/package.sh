@@ -14,41 +14,72 @@ out_dir="$root_dir/dist"
 archive="$out_dir/${package_name}.tar.gz"
 checksum_file="${archive}.sha256"
 
-sensitive_file="$({
-    find "$root_dir" \
-        \( -path "$root_dir/.git" -o -path "$root_dir/build" -o -path "$root_dir/dist" \) -prune -o \
-        -type f \( -iname '*.p12' -o -iname '*.pfx' -o -iname '*.mobileprovision' -o -iname '*.ipa' \) \
-        -print -quit
-} || true)"
-if [[ -n "$sensitive_file" ]]; then
-    echo "Refusing to package potentially sensitive signing material: $sensitive_file" >&2
+if ! git -C "$root_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Source packages must be created from a Git checkout." >&2
+    exit 1
+fi
+
+if [[ -n "$(git -C "$root_dir" status --porcelain --untracked-files=normal)" ]]; then
+    echo "Refusing to package a dirty working tree. Commit or remove tracked and non-ignored changes first." >&2
+    exit 1
+fi
+
+invalid_path=""
+shopt -s nocasematch
+while IFS= read -r -d '' path; do
+    case "$path" in
+        *$'\n'*|*$'\r'*|*$'\t'*)
+            invalid_path="$path"
+            break
+            ;;
+    esac
+    case "$path" in
+        .clang-format|.clang-tidy|.dockerignore|.editorconfig|.gitattributes|.gitignore|\
+        CMakeLists.txt|CMakePresets.json|CONTRIBUTING.md|Dockerfile|LICENSE|Makefile|README.md|SECURITY.md|CHANGELOG.md|\
+        cmake/*|docs/*|include/*|scripts/*|src/*|tests/*|.github/*)
+            ;;
+        *)
+            invalid_path="$path"
+            break
+            ;;
+    esac
+
+    case "/$path/" in
+        */tests/assets/*|*/tests/ipa/*|*/tests/packages/*|*.p8/*|*.p12/*|*.pfx/*|*.pk8/*|*.pkcs8/*|\
+        *.pkcs12/*|*.mobileprovision/*|*.provisionprofile/*|*.pem/*|*.key/*|*.jks/*|*.keystore/*|\
+        *.cer/*|*.crt/*|*.der/*|*.ipa/*|*/.env/*|*/.env.*/*|*.credentials/*|*.secrets/*|*.token/*|\
+        *.log/*|*.core/*|*.dump/*|*.dSYM/*|*/.orchardseal_cache/*|\
+        */.orchardseal_debug/*)
+            invalid_path="$path"
+            break
+            ;;
+    esac
+    case "${path##*/}" in
+        core|core.[0-9]*)
+            invalid_path="$path"
+            break
+            ;;
+    esac
+done < <(git -C "$root_dir" ls-tree -rz --name-only HEAD)
+
+if [[ -n "$invalid_path" ]]; then
+    echo "Refusing tracked path outside the source allowlist or denied as sensitive/runtime data: $invalid_path" >&2
     exit 1
 fi
 
 mkdir -p "$out_dir"
-temp_root="$(mktemp -d "${TMPDIR:-/tmp}/orchardseal-package.XXXXXX")"
-trap 'rm -rf "$temp_root"' EXIT
-stage_dir="$temp_root/$package_name"
-mkdir -p "$stage_dir"
+temp_root="$(mktemp -d "$out_dir/.orchardseal-package.XXXXXX")"
+trap 'rm -rf "$temp_root"' EXIT HUP INT TERM
+temporary_archive="$temp_root/${package_name}.tar.gz"
+temporary_checksum="${temporary_archive}.sha256"
 
-(
-    cd "$root_dir"
-    tar -cf - \
-        --exclude='./.git' \
-        --exclude='./build' \
-        --exclude='./bin' \
-        --exclude='./dist' \
-        --exclude='./install' \
-        --exclude='./.DS_Store' \
-        .
-) | (
-    cd "$stage_dir"
-    tar -xf -
-)
+git -C "$root_dir" archive --format=tar --prefix="${package_name}/" HEAD > "$temp_root/source.tar"
+gzip -n -9 < "$temp_root/source.tar" > "$temporary_archive"
 
-tar -czf "$archive" -C "$temp_root" "$package_name"
-digest="$(openssl dgst -sha256 "$archive" | awk '{print $NF}')"
-printf '%s  %s\n' "$digest" "$(basename "$archive")" > "$checksum_file"
+digest="$(openssl dgst -sha256 "$temporary_archive" | awk '{print $NF}')"
+printf '%s  %s\n' "$digest" "$(basename "$archive")" > "$temporary_checksum"
+mv -f "$temporary_archive" "$archive"
+mv -f "$temporary_checksum" "$checksum_file"
 
 printf 'Created %s\n' "$archive"
 printf 'Created %s\n' "$checksum_file"
