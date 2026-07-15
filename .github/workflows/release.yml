@@ -15,9 +15,9 @@ concurrency:
 jobs:
   publish:
     name: Validate, package, and publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
       - name: Install dependencies
@@ -31,6 +31,8 @@ jobs:
           project_version="$(sed -nE 's/^[[:space:]]*VERSION[[:space:]]+([0-9]+(\.[0-9]+)+).*/\1/p' CMakeLists.txt | head -n 1)"
           test -n "$project_version"
           test "$tag_version" = "$project_version"
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = "tag"
+          grep -Fqx "## [$tag_version]" CHANGELOG.md
       - name: Configure
         run: >-
           cmake -S . -B build/release
@@ -43,6 +45,21 @@ jobs:
         run: ctest --test-dir build/release --output-on-failure
       - name: Package source archive
         run: scripts/package.sh "${GITHUB_REF_NAME#v}"
+      - name: Verify source checksum
+        run: |
+          cd dist
+          sha256sum --check "OrchardSeal-${GITHUB_REF_NAME#v}.tar.gz.sha256"
+      - name: Prepare release notes from changelog
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 == "## [" version "]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > dist/release-notes.md
+          test -s dist/release-notes.md
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,9 +68,10 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           files=("dist/OrchardSeal-${version}.tar.gz" "dist/OrchardSeal-${version}.tar.gz.sha256")
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file dist/release-notes.md --title "OrchardSeal ${version}"
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${files[@]}" \
-              --generate-notes \
+              --notes-file dist/release-notes.md \
               --title "OrchardSeal ${version}"
           fi

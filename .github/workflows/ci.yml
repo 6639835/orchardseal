@@ -15,11 +15,11 @@ concurrency:
 jobs:
   linux:
     name: Linux / Release / warnings-as-errors
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Cache CMake dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/cmake-fetchcontent
           key: ${{ runner.os }}-cmake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
@@ -38,19 +38,32 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Verify source packaging
+        run: |
+          scripts/package.sh ci
+          cd dist
+          sha256sum --check OrchardSeal-ci.tar.gz.sha256
 
   macos:
     name: macOS / Release
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Cache CMake dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/cmake-fetchcontent
           key: ${{ runner.os }}-cmake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
       - name: Install dependencies
         run: brew install cmake openssl@3
+      - name: Verify Bash 3.2 script contract
+        shell: bash
+        run: |
+          for script in scripts/build.sh scripts/test.sh; do
+            status=0
+            "$script" Unsupported || status=$?
+            test "$status" -eq 2
+          done
       - name: Configure
         run: >-
           cmake -S . -B build
@@ -65,22 +78,32 @@ jobs:
 
   windows:
     name: Windows / Release
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Cache CMake dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/cmake-fetchcontent
           key: ${{ runner.os }}-cmake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
-      - uses: lukka/get-cmake@latest
+      - name: Checkout pinned vcpkg
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: microsoft/vcpkg
+          ref: 120deac3062162151622ca4860575a33844ba10b
+          path: .cache/vcpkg
       - name: Install OpenSSL
-        run: vcpkg install openssl:x64-windows
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE ".cache/vcpkg"
+          & (Join-Path $vcpkgRoot "bootstrap-vcpkg.bat") -disableMetrics
+          & (Join-Path $vcpkgRoot "vcpkg.exe") install openssl:x64-windows --clean-after-build
       - name: Configure
         run: >-
           cmake -S . -B build -A x64
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/.cache/vcpkg/scripts/buildsystems/vcpkg.cmake"
           -DORCHARDSEAL_BUILD_TESTS=ON
+          -DORCHARDSEAL_WARNINGS_AS_ERRORS=ON
           -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.cache/cmake-fetchcontent
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -89,11 +112,11 @@ jobs:
 
   static-analysis:
     name: Linux / clang-tidy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Cache CMake dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/cmake-fetchcontent
           key: ${{ runner.os }}-cmake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
@@ -116,14 +139,14 @@ jobs:
 
   sanitizers:
     name: Linux / ASan + UBSan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Cache CMake dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/cmake-fetchcontent
           key: ${{ runner.os }}-cmake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
