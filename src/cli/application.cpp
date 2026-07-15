@@ -140,10 +140,10 @@ namespace orchardseal::cli {
 
         const std::string jsonReport = audit::ToJson(report);
         if (!options_.auditReportFile.empty()) {
-            const std::filesystem::path reportPath(options_.auditReportFile);
+            const std::filesystem::path reportPath = std::filesystem::u8path(options_.auditReportFile);
             const std::filesystem::path parent = reportPath.parent_path();
-            if (!parent.empty() && !FileSystem::CreateFolder(parent.string().c_str())) {
-                Logger::ErrorV(">>> Could not create audit report directory: %s\n", parent.string().c_str());
+            if (!parent.empty() && !FileSystem::CreateFolder(parent.u8string().c_str())) {
+                Logger::ErrorV(">>> Could not create audit report directory: %s\n", parent.u8string().c_str());
                 return 1;
             }
             if (!FileSystem::WriteFile(options_.auditReportFile.c_str(), jsonReport)) {
@@ -155,11 +155,7 @@ namespace orchardseal::cli {
         const std::string standardOutput =
             options_.auditFormat == AuditFormat::Json ? jsonReport : audit::ToText(report);
         if (!standardOutput.empty()) {
-            const std::size_t written = std::fwrite(standardOutput.data(), 1, standardOutput.size(), stdout);
-            if (written != standardOutput.size()) {
-                Logger::Error(">>> Could not write the audit report to standard output.\n");
-                return 1;
-            }
+            Logger::Report(standardOutput.c_str());
         }
 
         return audit::HasBlockingIssues(report, options_.strictAudit) ? 3 : 0;
@@ -200,7 +196,9 @@ namespace orchardseal::cli {
         }
 
         if (!options_.removeDylibNames.empty()) {
-            macho.RemoveDylibs(NormalizeDylibRemovalNames(options_.removeDylibNames));
+            if (!macho.RemoveDylibs(NormalizeDylibRemovalNames(options_.removeDylibNames))) {
+                return 1;
+            }
         }
 
         Stopwatch timer;
@@ -210,9 +208,13 @@ namespace orchardseal::cli {
         std::string infoSha1;
         std::string infoSha256;
         std::string codeResourcesData;
-        const bool signedOk =
+        bool signedOk =
             macho.Sign(&signAsset, options_.force, options_.bundleId, infoSha1, infoSha256, codeResourcesData);
         timer.PrintResult(signedOk, ">>> Signed %s!", signedOk ? "OK" : "Failed");
+        if (signedOk && options_.checkSignature && CheckCertificate(options_.targetPath, "") != 0) {
+            Logger::Error(">>> Post-sign verification failed.\n");
+            signedOk = false;
+        }
         return signedOk ? 0 : 1;
     }
 
@@ -290,7 +292,10 @@ namespace orchardseal::cli {
         actionTimer.PrintResult(signedOk, ">>> Signed %s!", signedOk ? "OK" : "Failed");
 
         if (signedOk && options_.checkSignature && !bundle.AppFolder().empty()) {
-            CheckSignedBinary(bundle.AppFolder());
+            if (CheckSignedBinary(bundle.AppFolder()) != 0) {
+                Logger::Error(">>> Post-sign verification failed.\n");
+                signedOk = false;
+            }
         }
 
         if (signedOk && !outputFile.empty()) {
@@ -307,8 +312,11 @@ namespace orchardseal::cli {
                     actionTimer.PrintResult(true, ">>> Archive OK! (%s)",
                                             FileSystem::GetFileSizeString(outputFile.c_str()).c_str());
                     if (!options_.metadataDirectory.empty()) {
-                        FileSystem::CreateFolder(options_.metadataDirectory.c_str());
-                        GetMetadata(bundle.AppFolder(), options_.metadataDirectory, outputFile);
+                        if (!FileSystem::CreateFolder(options_.metadataDirectory.c_str()) ||
+                            !GetMetadata(bundle.AppFolder(), options_.metadataDirectory, outputFile)) {
+                            Logger::Error(">>> Metadata extraction failed.\n");
+                            signedOk = false;
+                        }
                     }
                 }
             } else {
@@ -318,7 +326,11 @@ namespace orchardseal::cli {
         }
 
         if (signedOk && options_.install) {
-            signedOk = Utility::SystemExecV("ideviceinstaller install  \"%s\"", outputFile.c_str());
+            signedOk = Utility::SystemExec({"ideviceinstaller", "install", outputFile});
+            if (!signedOk) {
+                Logger::Error(
+                    ">>> Installation failed. Ensure ideviceinstaller is available and the device is ready.\n");
+            }
         }
 
         if (tempFolder) {

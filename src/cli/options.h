@@ -67,7 +67,7 @@ namespace orchardseal::cli {
     class CommandLineOptions {
       public:
         static ParseResult Parse(int argc, char* argv[]);
-        static int PrintUsage();
+        static int PrintUsage(bool toStandardError = false);
         static bool IsDylibLoadCommandName(const std::string& name);
 
       private:

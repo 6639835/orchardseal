@@ -16,4 +16,4 @@ extern int opterr;
 extern int optopt;
 extern char* optarg;
 
-int getopt_long(int argc, char* const argv[], const char* shortopts, const struct option* longopts, int* longindex);
+int getopt_long(int argc, char* argv[], const char* shortopts, const struct option* longopts, int* longindex);

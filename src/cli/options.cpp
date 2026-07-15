@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -99,6 +100,13 @@ namespace orchardseal::cli {
             return path == nullptr ? std::string() : FileSystem::GetFullPath(path);
         }
 
+        const char* DebugOptionValue(int optionValue, const char* value) {
+            if (optionValue == 'p') {
+                return "<redacted>";
+            }
+            return value == nullptr ? "" : value;
+        }
+
     } // namespace
 
     bool CommandLineOptions::IsDylibLoadCommandName(const std::string& name) {
@@ -150,7 +158,11 @@ namespace orchardseal::cli {
         ParseResult result;
         result.options.tempFolder = FileSystem::GetTempFolder();
 
+#ifdef _WIN32
+        optind = 0;
+#else
         optind = 1;
+#endif
         opterr = 0;
 
         int optionIndex = -1;
@@ -296,10 +308,10 @@ namespace orchardseal::cli {
                 break;
             case 'v':
                 result.status = ParseStatus::VersionRequested;
-                return result;
+                break;
             case 'h':
                 result.status = ParseStatus::HelpRequested;
-                return result;
+                break;
             case '?':
             default:
                 result.status = ParseStatus::Error;
@@ -309,12 +321,21 @@ namespace orchardseal::cli {
             }
 
             if (Logger::IsDebug()) {
-                Logger::DebugV(">>> Option:\t-%c, %s\n", opt, optarg == nullptr ? "" : optarg);
+                Logger::DebugV(">>> Option:\t%d, %s\n", opt, DebugOptionValue(opt, optarg));
             }
         }
 
         for (int index = optind; index < argc; ++index) {
             result.options.rawArguments.emplace_back(argv[index]);
+        }
+
+        if (result.status == ParseStatus::HelpRequested || result.status == ParseStatus::VersionRequested) {
+            if (!result.options.rawArguments.empty()) {
+                result.status = ParseStatus::Error;
+                result.message = "Help and version modes do not accept input operands.";
+                result.exitCode = 2;
+            }
+            return result;
         }
 
         if (result.options.rawArguments.empty()) {
@@ -323,57 +344,70 @@ namespace orchardseal::cli {
             return result;
         }
 
+        if (result.options.rawArguments.size() != 1U) {
+            result.status = ParseStatus::Error;
+            result.message = "Expected exactly one input path; extra operands are not supported.";
+            result.exitCode = 2;
+            return result;
+        }
+
         result.options.targetPath = FileSystem::GetFullPath(result.options.rawArguments.front().c_str());
         return result;
     }
 
-    int CommandLineOptions::PrintUsage() {
-        Logger::PrintV("OrchardSeal %s — portable iOS signing and SealCheck preflight audits.\n\n",
-                       ORCHARDSEAL_VERSION_STRING);
-        Logger::Print(
-            "Usage: orchardseal [options] [-k privkey.pem] [-m dev.mobileprovision] [-o output.ipa] file|folder\n\n");
-        Logger::Print("Signing options:\n");
-        Logger::Print("  -k, --pkey              Path to private key or p12 file. PEM or DER format.\n");
-        Logger::Print("  -m, --prov              Path to mobile provisioning profile. Repeat for multiple profiles.\n");
-        Logger::Print("  -c, --cert              Path to certificate file. PEM or DER format.\n");
-        Logger::Print("  -a, --adhoc             Perform an ad-hoc signature only.\n");
-        Logger::Print("  -p, --password          Password for private key or p12 file.\n");
-        Logger::Print("  -2, --sha256_only       Deprecated; SHA256-only is the default.\n");
-        Logger::Print("  -L, --legacy_sha1       Emit a dual SHA1+SHA256 CodeDirectory for old iOS support.\n\n");
-        Logger::Print("Bundle mutation options:\n");
-        Logger::Print("  -b, --bundle_id         New bundle identifier.\n");
-        Logger::Print("  -n, --bundle_name       New display name.\n");
-        Logger::Print("  -r, --bundle_version    New bundle version.\n");
-        Logger::Print("  -e, --entitlements      Entitlements plist to use.\n");
-        Logger::Print("  -l, --dylib             Dylib path or load command to inject. Repeatable.\n");
-        Logger::Print("      --dylib_scope       Scope for -l/-D: root, extensions, frameworks, files, all.\n");
-        Logger::Print("  -D, --rm_dylib          Dylib load command or name to remove. Repeatable.\n");
-        Logger::Print("  -w, --weak              Inject dylibs as LC_LOAD_WEAK_DYLIB.\n");
-        Logger::Print("      --icon              Replace declared app icon PNG files before signing.\n");
-        Logger::Print("  -R, --rm_provision      Remove embedded.mobileprovision after signing.\n");
-        Logger::Print("  -S, --enable_docs       Enable document browser and file sharing keys.\n");
-        Logger::Print("  -M, --min_version       Set MinimumOSVersion in Info.plist.\n");
-        Logger::Print("  -E, --rm_extensions     Remove all app extensions.\n");
-        Logger::Print("  -W, --rm_watch          Remove Watch app content.\n");
-        Logger::Print("  -U, --rm_uisd           Remove UISupportedDevices from Info.plist.\n\n");
-        Logger::Print("Preflight audit (read-only):\n");
-        Logger::Print(
-            "      --audit             Inspect an IPA, app bundle, folder, or Mach-O without modifying it.\n");
-        Logger::Print("      --audit-format      Report format written to stdout: text or json. Default: text.\n");
-        Logger::Print("      --audit-report      Save the full JSON report to a file; implies --audit.\n");
-        Logger::Print("      --strict-audit      Return exit code 3 for warnings as well as errors.\n\n");
-        Logger::Print("Output and diagnostics:\n");
-        Logger::Print("  -o, --output            Output IPA path. Required when input is an IPA.\n");
-        Logger::Print("  -z, --zip_level         Compression level for IPA output: 0-9.\n");
-        Logger::Print("  -x, --metadata          Extract metadata and icon to a directory after archive.\n");
-        Logger::Print("  -C, --check             Check certificate validity / signed binary details.\n");
-        Logger::Print("  -i, --install           Install IPA using ideviceinstaller after signing.\n");
-        Logger::Print("  -t, --temp_folder       Temporary working directory.\n");
-        Logger::Print("  -d, --debug             Enable debug logging and .orchardseal_debug output.\n");
-        Logger::Print("  -V, --verbose           Enable normal informational logs.\n");
-        Logger::Print("  -q, --quiet             Suppress logs.\n");
-        Logger::Print("  -v, --version           Show version.\n");
-        Logger::Print("  -h, --help              Show this help.\n");
+    int CommandLineOptions::PrintUsage(bool toStandardError) {
+        const std::string heading = std::string("OrchardSeal ") + ORCHARDSEAL_VERSION_STRING +
+                                    " — portable iOS signing and SealCheck preflight audits.\n\n";
+        static const char usage[] =
+            "Usage: orchardseal [options] [-k privkey.pem] [-m dev.mobileprovision] [-o output.ipa] file|folder\n\n"
+            "Signing options:\n"
+            "  -k, --pkey              Path to private key or p12 file. PEM or DER format.\n"
+            "  -m, --prov              Path to mobile provisioning profile. Repeat for multiple profiles.\n"
+            "  -c, --cert              Path to certificate file. PEM or DER format.\n"
+            "  -a, --adhoc             Perform an ad-hoc signature only.\n"
+            "  -p, --password          Password for private key or p12 file.\n"
+            "  -2, --sha256_only       Deprecated; SHA256-only is the default.\n"
+            "  -L, --legacy_sha1       Emit a dual SHA1+SHA256 CodeDirectory for old iOS support.\n\n"
+            "Bundle mutation options:\n"
+            "  -b, --bundle_id         New bundle identifier.\n"
+            "  -n, --bundle_name       New display name.\n"
+            "  -r, --bundle_version    New bundle version.\n"
+            "  -e, --entitlements      Entitlements plist to use.\n"
+            "  -l, --dylib             Dylib path or load command to inject. Repeatable.\n"
+            "      --dylib_scope       Scope for -l/-D: root, extensions, frameworks, files, all.\n"
+            "  -D, --rm_dylib          Dylib load command or name to remove. Repeatable.\n"
+            "  -w, --weak              Inject dylibs as LC_LOAD_WEAK_DYLIB.\n"
+            "      --icon              Replace declared app icon PNG files before signing.\n"
+            "  -R, --rm_provision      Remove embedded.mobileprovision after signing.\n"
+            "  -S, --enable_docs       Enable document browser and file sharing keys.\n"
+            "  -M, --min_version       Set MinimumOSVersion in Info.plist.\n"
+            "  -E, --rm_extensions     Remove all app extensions.\n"
+            "  -W, --rm_watch          Remove Watch app content.\n"
+            "  -U, --rm_uisd           Remove UISupportedDevices from Info.plist.\n\n"
+            "Preflight audit (read-only):\n"
+            "      --audit             Inspect an IPA, app bundle, folder, or Mach-O without modifying it.\n"
+            "      --audit-format      Report format written to stdout: text or json. Default: text.\n"
+            "      --audit-report      Save the full JSON report to a file; implies --audit.\n"
+            "      --strict-audit      Return exit code 3 for warnings as well as errors.\n\n"
+            "Output and diagnostics:\n"
+            "  -o, --output            Output IPA path. Required when input is an IPA.\n"
+            "  -z, --zip_level         Compression level for IPA output: 0-9.\n"
+            "  -x, --metadata          Extract metadata and icon to a directory after archive.\n"
+            "  -C, --check             Check certificate validity / signed binary details.\n"
+            "  -i, --install           Install IPA using ideviceinstaller after signing.\n"
+            "  -t, --temp_folder       Temporary working directory.\n"
+            "  -d, --debug             Enable debug logging and .orchardseal_debug output.\n"
+            "  -V, --verbose           Enable normal informational logs.\n"
+            "  -q, --quiet             Suppress logs.\n"
+            "  -v, --version           Show version.\n"
+            "  -h, --help              Show this help.\n";
+        if (toStandardError) {
+            Logger::ReportError(heading.c_str());
+            Logger::ReportError(usage);
+        } else {
+            Logger::Report(heading.c_str());
+            Logger::Report(usage);
+        }
         return 0;
     }
 
