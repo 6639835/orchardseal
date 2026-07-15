@@ -25,10 +25,15 @@
 #include <openssl/x509v3.h>
 #include <ctime>
 #include <cstring>
+#include <limits>
+#include <chrono>
+#include <cctype>
+#include <new>
 
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <process.h>
 #pragma comment(lib, "ws2_32.lib")
 typedef int ssize_t;
 #define OCSP_CLOSE_SOCKET(s) closesocket(s)
@@ -36,8 +41,278 @@ typedef int ssize_t;
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <sys/wait.h>
+#include <signal.h>
 #define OCSP_CLOSE_SOCKET(s) close(s)
 #endif
+
+#ifdef _WIN32
+namespace {
+    struct WindowsResolverContext {
+        OVERLAPPED overlapped{};
+        HANDLE cancellationHandle = nullptr;
+        PADDRINFOEXW result = nullptr;
+    };
+
+    bool EnsureWinsockInitialized(string& error) {
+        static const int startupResult = [] {
+            WSADATA data{};
+            return WSAStartup(MAKEWORD(2, 2), &data);
+        }();
+        if (startupResult != 0) {
+            error = "Could not initialize Windows networking";
+            return false;
+        }
+        // This process-lifetime Winsock reference intentionally remains active:
+        // a cancelled asynchronous resolver may complete after its caller's
+        // hard deadline, and WSACleanup before that completion is unsafe.
+        return true;
+    }
+
+    bool Utf8ToWideForResolver(const string& input, std::wstring& output) {
+        if (input.empty() || input.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+            return false;
+        const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
+                                               static_cast<int>(input.size()), nullptr, 0);
+        if (length <= 0)
+            return false;
+        output.assign(static_cast<size_t>(length), L'\0');
+        return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(), static_cast<int>(input.size()),
+                                   output.data(), length) == length;
+    }
+
+    void DestroyWindowsResolverContext(WindowsResolverContext* context) {
+        if (context == nullptr)
+            return;
+        if (context->result != nullptr)
+            FreeAddrInfoExW(context->result);
+        if (context->overlapped.hEvent != nullptr)
+            CloseHandle(context->overlapped.hEvent);
+        delete context;
+    }
+
+    unsigned __stdcall FinishCancelledWindowsResolver(void* parameter) {
+        auto* context = static_cast<WindowsResolverContext*>(parameter);
+        WaitForSingleObject(context->overlapped.hEvent, INFINITE);
+        GetAddrInfoExOverlappedResult(&context->overlapped);
+        DestroyWindowsResolverContext(context);
+        return 0;
+    }
+} // namespace
+#endif
+
+static bool ConnectWithTimeout(
+#ifdef _WIN32
+    SOCKET socketHandle,
+#else
+    int socketHandle,
+#endif
+    const sockaddr* address, int addressLength, int timeoutMilliseconds) {
+#ifdef _WIN32
+    u_long nonBlocking = 1;
+    if (ioctlsocket(socketHandle, FIONBIO, &nonBlocking) != 0)
+        return false;
+    const int result = connect(socketHandle, address, addressLength);
+    if (result != 0 && WSAGetLastError() != WSAEWOULDBLOCK)
+        return false;
+#else
+    const int oldFlags = fcntl(socketHandle, F_GETFL, 0);
+    if (oldFlags < 0 || fcntl(socketHandle, F_SETFL, oldFlags | O_NONBLOCK) != 0)
+        return false;
+    const int result = connect(socketHandle, address, addressLength);
+    if (result != 0 && errno != EINPROGRESS)
+        return false;
+#endif
+    fd_set writable;
+    FD_ZERO(&writable);
+    FD_SET(socketHandle, &writable);
+    timeval timeout{timeoutMilliseconds / 1000, (timeoutMilliseconds % 1000) * 1000};
+    const int selected = select(static_cast<int>(socketHandle) + 1, nullptr, &writable, nullptr, &timeout);
+    int socketError = 0;
+#ifdef _WIN32
+    int errorLength = sizeof(socketError);
+#else
+    socklen_t errorLength = sizeof(socketError);
+#endif
+    const bool connected = selected == 1 &&
+                           getsockopt(socketHandle, SOL_SOCKET, SO_ERROR,
+#ifdef _WIN32
+                                      reinterpret_cast<char*>(&socketError),
+#else
+                                      &socketError,
+#endif
+                                      &errorLength) == 0 &&
+                           socketError == 0;
+#ifdef _WIN32
+    nonBlocking = 0;
+    ioctlsocket(socketHandle, FIONBIO, &nonBlocking);
+#else
+    fcntl(socketHandle, F_SETFL, oldFlags);
+#endif
+    return connected;
+}
+
+static bool ResolveIPv4WithDeadline(const string& host, const string& port,
+                                    std::chrono::steady_clock::time_point deadline, sockaddr_in& address,
+                                    string& error) {
+#ifdef _WIN32
+    if (!EnsureWinsockInitialized(error))
+        return false;
+    std::wstring wideHost;
+    std::wstring widePort;
+    if (!Utf8ToWideForResolver(host, wideHost) || !Utf8ToWideForResolver(port, widePort)) {
+        error = "OCSP resolver host or port is not valid UTF-8";
+        return false;
+    }
+
+    auto* context = new (std::nothrow) WindowsResolverContext();
+    if (context == nullptr) {
+        error = "Could not allocate bounded DNS resolver";
+        return false;
+    }
+    context->overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (context->overlapped.hEvent == nullptr) {
+        DestroyWindowsResolverContext(context);
+        error = "Could not create bounded DNS resolver event";
+        return false;
+    }
+
+    ADDRINFOEXW hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    const int startResult =
+        GetAddrInfoExW(wideHost.c_str(), widePort.c_str(), NS_DNS, nullptr, &hints, &context->result, nullptr,
+                       &context->overlapped, nullptr, &context->cancellationHandle);
+    int resolutionResult = startResult;
+    if (startResult == WSA_IO_PENDING) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        const DWORD waitMilliseconds =
+            remaining.count() <= 0 ? 0
+                                   : static_cast<DWORD>(std::min<std::int64_t>(remaining.count() + 1, MAXDWORD - 1));
+        const DWORD waitResult = WaitForSingleObject(context->overlapped.hEvent, waitMilliseconds);
+        if (waitResult != WAIT_OBJECT_0) {
+            GetAddrInfoExCancel(&context->cancellationHandle);
+            if (WaitForSingleObject(context->overlapped.hEvent, 0) == WAIT_OBJECT_0) {
+                GetAddrInfoExOverlappedResult(&context->overlapped);
+                DestroyWindowsResolverContext(context);
+            } else {
+                uintptr_t cleanupThread =
+                    _beginthreadex(nullptr, 0, FinishCancelledWindowsResolver, context, 0, nullptr);
+                if (cleanupThread != 0) {
+                    CloseHandle(reinterpret_cast<HANDLE>(cleanupThread));
+                }
+                // If the cleanup thread could not be created, retain the heap
+                // context intentionally. The pending Windows operation still
+                // owns it, so freeing it here would permit a use-after-free.
+            }
+            error = waitResult == WAIT_TIMEOUT ? "DNS resolution exceeded OCSP request deadline"
+                                               : "DNS resolver wait failed";
+            return false;
+        }
+        resolutionResult = GetAddrInfoExOverlappedResult(&context->overlapped);
+    }
+
+    bool success = false;
+    if (resolutionResult == 0) {
+        for (PADDRINFOEXW candidate = context->result; candidate != nullptr; candidate = candidate->ai_next) {
+            if (candidate->ai_family == AF_INET && candidate->ai_addr != nullptr &&
+                candidate->ai_addrlen >= sizeof(address)) {
+                std::memcpy(&address, candidate->ai_addr, sizeof(address));
+                success = true;
+                break;
+            }
+        }
+    }
+    DestroyWindowsResolverContext(context);
+    if (!success)
+        error = "DNS resolution failed";
+    return success;
+#else
+    int descriptors[2] = {-1, -1};
+    if (pipe(descriptors) != 0) {
+        error = "Could not create bounded DNS resolver";
+        return false;
+    }
+    const pid_t child = fork();
+    if (child < 0) {
+        close(descriptors[0]);
+        close(descriptors[1]);
+        error = "Could not start bounded DNS resolver";
+        return false;
+    }
+    if (child == 0) {
+        close(descriptors[0]);
+        sockaddr_in resolved{};
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo* result = nullptr;
+        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &result) == 0 && result != nullptr &&
+            result->ai_addrlen >= sizeof(resolved)) {
+            std::memcpy(&resolved, result->ai_addr, sizeof(resolved));
+            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&resolved);
+            size_t written = 0;
+            while (written < sizeof(resolved)) {
+                const ssize_t count = write(descriptors[1], bytes + written, sizeof(resolved) - written);
+                if (count < 0 && errno == EINTR)
+                    continue;
+                if (count <= 0)
+                    break;
+                written += static_cast<size_t>(count);
+            }
+        }
+        if (result != nullptr)
+            freeaddrinfo(result);
+        close(descriptors[1]);
+        _exit(0);
+    }
+
+    close(descriptors[1]);
+    uint8_t* output = reinterpret_cast<uint8_t*>(&address);
+    size_t received = 0;
+    bool success = true;
+    while (received < sizeof(address)) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) {
+            success = false;
+            error = "DNS resolution exceeded OCSP request deadline";
+            break;
+        }
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(descriptors[0], &readable);
+        timeval timeout{static_cast<time_t>(remaining.count() / 1000000),
+                        static_cast<suseconds_t>(remaining.count() % 1000000)};
+        const int selected = select(descriptors[0] + 1, &readable, nullptr, nullptr, &timeout);
+        if (selected <= 0) {
+            success = false;
+            error = selected == 0 ? "DNS resolution exceeded OCSP request deadline" : "DNS resolver failed";
+            break;
+        }
+        const ssize_t count = read(descriptors[0], output + received, sizeof(address) - received);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0) {
+            success = false;
+            error = "DNS resolution failed";
+            break;
+        }
+        received += static_cast<size_t>(count);
+    }
+    close(descriptors[0]);
+    // The address has already been copied through the pipe; terminating the
+    // resolver also bounds any libc cleanup after resolution.
+    kill(child, SIGKILL);
+    int childStatus = 0;
+    while (waitpid(child, &childStatus, 0) < 0 && errno == EINTR) {
+    }
+    return success && received == sizeof(address);
+#endif
+}
 
 // ─── helpers ───────────────────────────────────────────────────────
 
@@ -81,7 +356,14 @@ static int DaysRemaining(const ASN1_TIME* t) {
     int day = 0, sec = 0;
     if (ASN1_TIME_diff(&day, &sec, NULL, t) != 1)
         return -1;
+    if (day == 0 && sec < 0)
+        return -1;
     return day;
+}
+
+static bool IsCurrentlyValid(X509* certificate) {
+    return certificate != nullptr && X509_cmp_current_time(X509_get0_notBefore(certificate)) <= 0 &&
+           X509_cmp_current_time(X509_get0_notAfter(certificate)) >= 0;
 }
 
 static string GetNameField(const X509_NAME* name, int nid) {
@@ -363,7 +645,7 @@ struct MachOSignInfo {
     X509* cert;
 };
 
-static MachOSignInfo ExtractFromMachOData(std::uint8_t* base, std::uint32_t length) {
+static MachOSignInfo ExtractFromThinMachOData(std::uint8_t* base, std::uint32_t length) {
     MachOSignInfo info{false, nullptr};
     MachOSlice slice;
     if (!slice.Init(base, length) || slice.SignatureData() == nullptr || slice.SignatureSize() < sizeof(CS_SuperBlob)) {
@@ -409,6 +691,44 @@ static MachOSignInfo ExtractFromMachOData(std::uint8_t* base, std::uint32_t leng
         break;
     }
     return info;
+}
+
+static MachOSignInfo ExtractFromMachOData(std::uint8_t* base, std::uint32_t length) {
+    if (base == nullptr || length < sizeof(std::uint32_t))
+        return {false, nullptr};
+    std::uint32_t magic = 0;
+    std::memcpy(&magic, base, sizeof(magic));
+    if (magic != FAT_MAGIC && magic != FAT_CIGAM)
+        return ExtractFromThinMachOData(base, length);
+    if (length < sizeof(fat_header))
+        return {false, nullptr};
+    fat_header header{};
+    std::memcpy(&header, base, sizeof(header));
+    const std::uint32_t count = magic == FAT_MAGIC ? header.nfat_arch : LE(header.nfat_arch);
+    if (count == 0 || count > (length - sizeof(fat_header)) / sizeof(fat_arch))
+        return {false, nullptr};
+    X509* representative = nullptr;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        fat_arch architecture{};
+        std::memcpy(&architecture, base + sizeof(fat_header) + index * sizeof(fat_arch), sizeof(architecture));
+        const std::uint32_t offset = magic == FAT_MAGIC ? architecture.offset : LE(architecture.offset);
+        const std::uint32_t size = magic == FAT_MAGIC ? architecture.size : LE(architecture.size);
+        if (size == 0 || offset > length || size > length - offset) {
+            X509_free(representative);
+            return {false, nullptr};
+        }
+        MachOSignInfo current = ExtractFromThinMachOData(base + offset, size);
+        if (!current.isSigned) {
+            X509_free(current.cert);
+            X509_free(representative);
+            return {false, nullptr};
+        }
+        if (representative == nullptr)
+            representative = current.cert;
+        else
+            X509_free(current.cert);
+    }
+    return {true, representative};
 }
 
 // ─── Read from zip (no extraction) ──────────────────────────────────
@@ -518,9 +838,10 @@ static bool ExtractOCSPUrl(X509* cert, string& host, string& port, string& path)
         if (!uriData || uriLen <= 0)
             continue;
         string url((const char*)uriData, uriLen);
-        // parse http://host[:port]/path
+        // Only Apple's plain-HTTP responders are supported. Refusing arbitrary
+        // certificate-controlled hosts prevents OCSP from becoming an SSRF primitive.
         size_t schemeEnd = url.find("://");
-        if (schemeEnd == string::npos)
+        if (schemeEnd == string::npos || url.substr(0, schemeEnd) != "http")
             continue;
         size_t hostStart = schemeEnd + 3;
         size_t pathStart = url.find('/', hostStart);
@@ -535,6 +856,13 @@ static bool ExtractOCSPUrl(X509* cert, string& host, string& port, string& path)
             host = hostPort;
             port = "80";
         }
+        const bool appleHost =
+            host == "apple.com" || (host.size() > 10 && host.compare(host.size() - 10, 10, ".apple.com") == 0);
+        if (!appleHost || port != "80" || path.empty() || path.front() != '/' || path.size() > 2048 ||
+            path.find_first_of("\r\n") != string::npos) {
+            host.clear();
+            continue;
+        }
         AUTHORITY_INFO_ACCESS_free(aia);
         return true;
     }
@@ -547,6 +875,10 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
     result.status = "Error";
     if (!cert || !issuer) {
         result.errorDetail = "Missing certificate or issuer";
+        return result;
+    }
+    if (X509_check_issued(issuer, cert) != X509_V_OK) {
+        result.errorDetail = "Issuer does not sign certificate";
         return result;
     }
 
@@ -563,6 +895,9 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
         else if (issuerCN.find("G2") != string::npos)
             ocspPath = "/ocsp03-wwdrg2";
     }
+
+    const auto requestDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    const auto deadlineExceeded = [&] { return std::chrono::steady_clock::now() >= requestDeadline; };
 
     OCSP_CERTID* certId = OCSP_cert_to_id(EVP_sha1(), cert, issuer);
     if (!certId) {
@@ -589,38 +924,62 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
         return result;
     }
 
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(ocspHost.c_str(), ocspPort.c_str(), &hints, &res) != 0 || !res) {
+    sockaddr_in resolvedAddress{};
+    string resolverError;
+    if (!ResolveIPv4WithDeadline(ocspHost, ocspPort, requestDeadline, resolvedAddress, resolverError)) {
         OPENSSL_free(derReq);
         OCSP_REQUEST_free(req);
-        result.errorDetail = "DNS failed";
+        result.errorDetail = resolverError;
         return result;
     }
 #ifdef _WIN32
-    SOCKET sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == INVALID_SOCKET) {
 #else
-    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
 #endif
-        freeaddrinfo(res);
         OPENSSL_free(derReq);
         OCSP_REQUEST_free(req);
         result.errorDetail = "Socket failed";
         return result;
     }
-    if (connect(sock, res->ai_addr, (int)res->ai_addrlen) < 0) {
-        freeaddrinfo(res);
+    auto applyRemainingSocketTimeout = [&]() {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(requestDeadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0)
+            return false;
+#ifdef _WIN32
+        const DWORD timeoutMilliseconds = static_cast<DWORD>(std::min<std::int64_t>(remaining.count(), 5000));
+        return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMilliseconds),
+                          sizeof(timeoutMilliseconds)) == 0 &&
+               setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMilliseconds),
+                          sizeof(timeoutMilliseconds)) == 0;
+#else
+        const auto bounded = std::min<std::int64_t>(remaining.count(), 5000);
+        timeval timeout{static_cast<time_t>(bounded / 1000), static_cast<suseconds_t>((bounded % 1000) * 1000)};
+        return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+               setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
+#endif
+    };
+    if (!applyRemainingSocketTimeout()) {
+        OCSP_CLOSE_SOCKET(sock);
+        OPENSSL_free(derReq);
+        OCSP_REQUEST_free(req);
+        result.errorDetail = "Could not enforce OCSP network timeout";
+        return result;
+    }
+    const auto connectBudget =
+        std::chrono::duration_cast<std::chrono::milliseconds>(requestDeadline - std::chrono::steady_clock::now());
+    const int connectTimeout = static_cast<int>(std::min<std::int64_t>(connectBudget.count(), 5000));
+    if (connectTimeout <= 0 || !ConnectWithTimeout(sock, reinterpret_cast<const sockaddr*>(&resolvedAddress),
+                                                   sizeof(resolvedAddress), connectTimeout)) {
         OCSP_CLOSE_SOCKET(sock);
         OPENSSL_free(derReq);
         OCSP_REQUEST_free(req);
         result.errorDetail = "Connect failed";
         return result;
     }
-    freeaddrinfo(res);
 
     char hdr[512];
     snprintf(hdr, sizeof(hdr),
@@ -635,6 +994,16 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
     const char* sendPtr = request.data();
     size_t sendRemain = request.size();
     while (sendRemain > 0) {
+        if (deadlineExceeded()) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "OCSP request deadline exceeded";
+            return result;
+        }
+        if (!applyRemainingSocketTimeout()) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "Could not enforce OCSP network timeout";
+            return result;
+        }
         ssize_t sent = send(sock, sendPtr, (int)sendRemain, 0);
         if (sent <= 0) {
             OCSP_CLOSE_SOCKET(sock);
@@ -649,10 +1018,25 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
     string resp;
     char rb[4096];
     while (resp.find("\r\n\r\n") == string::npos) {
+        if (deadlineExceeded()) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "OCSP request deadline exceeded";
+            return result;
+        }
+        if (!applyRemainingSocketTimeout()) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "Could not enforce OCSP network timeout";
+            return result;
+        }
         ssize_t br = recv(sock, rb, sizeof(rb), 0);
         if (br <= 0)
             break;
         resp.append(rb, br);
+        if (resp.size() > 64 * 1024) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "HTTP headers too large";
+            return result;
+        }
     }
 
     size_t he = resp.find("\r\n\r\n");
@@ -662,34 +1046,108 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
         return result;
     }
 
-    // parse Content-Length and read remaining body
-    long contentLength = 0;
-    {
-        size_t clPos = resp.find("Content-Length:");
-        if (clPos == string::npos)
-            clPos = resp.find("content-length:");
-        if (clPos != string::npos)
-            contentLength = atol(resp.c_str() + clPos + 15);
+    const size_t statusEnd = resp.find("\r\n");
+    if (statusEnd == string::npos ||
+        (resp.compare(0, 13, "HTTP/1.1 200 ") != 0 && resp.compare(0, 13, "HTTP/1.0 200 ") != 0)) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "OCSP responder returned non-200 status";
+        return result;
+    }
+
+    // Strictly require one decimal Content-Length. Chunked/close-delimited
+    // bodies are deliberately unsupported to keep the parser bounded.
+    string headers = resp.substr(0, he + 2);
+    string lowercaseHeaders = headers;
+    transform(lowercaseHeaders.begin(), lowercaseHeaders.end(), lowercaseHeaders.begin(),
+              [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    const string contentLengthHeader = "\r\ncontent-length:";
+    const size_t clPos = lowercaseHeaders.find(contentLengthHeader);
+    if (clPos == string::npos ||
+        lowercaseHeaders.find(contentLengthHeader, clPos + contentLengthHeader.size()) != string::npos) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "Missing or duplicate Content-Length";
+        return result;
+    }
+    const size_t valueStart = lowercaseHeaders.find_first_not_of(" \t", clPos + contentLengthHeader.size());
+    const size_t valueEnd = lowercaseHeaders.find("\r\n", valueStart);
+    if (valueStart == string::npos || valueEnd == string::npos) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "Invalid Content-Length";
+        return result;
+    }
+    string lengthText = lowercaseHeaders.substr(valueStart, valueEnd - valueStart);
+    const size_t lastDigit = lengthText.find_last_not_of(" \t");
+    if (lastDigit == string::npos) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "Invalid Content-Length";
+        return result;
+    }
+    lengthText.resize(lastDigit + 1);
+    if (!std::all_of(lengthText.begin(), lengthText.end(),
+                     [](unsigned char value) { return value >= '0' && value <= '9'; })) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "Invalid Content-Length";
+        return result;
+    }
+    char* parsedEnd = nullptr;
+    errno = 0;
+    const unsigned long long parsedLength = std::strtoull(lengthText.c_str(), &parsedEnd, 10);
+    if (errno != 0 || parsedEnd == lengthText.c_str() || *parsedEnd != '\0' || parsedLength == 0 ||
+        parsedLength > static_cast<unsigned long long>(std::numeric_limits<long>::max())) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "Invalid Content-Length";
+        return result;
+    }
+    const long contentLength = static_cast<long>(parsedLength);
+    constexpr long kMaximumOCSPResponse = 1024 * 1024;
+    if (contentLength < 0 || contentLength > kMaximumOCSPResponse) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "OCSP response too large";
+        return result;
     }
     size_t bodyHave = resp.size() - he - 4;
+    if (bodyHave > static_cast<size_t>(contentLength)) {
+        OCSP_CLOSE_SOCKET(sock);
+        result.errorDetail = "Trailing OCSP response data";
+        return result;
+    }
     while (contentLength > 0 && bodyHave < (size_t)contentLength) {
+        if (deadlineExceeded()) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "OCSP request deadline exceeded";
+            return result;
+        }
+        if (!applyRemainingSocketTimeout()) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "Could not enforce OCSP network timeout";
+            return result;
+        }
         ssize_t br = recv(sock, rb, sizeof(rb), 0);
-        if (br <= 0)
-            break;
+        if (br <= 0) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "Truncated OCSP response";
+            return result;
+        }
+        if (static_cast<size_t>(br) > static_cast<size_t>(contentLength) - bodyHave) {
+            OCSP_CLOSE_SOCKET(sock);
+            result.errorDetail = "Trailing OCSP response data";
+            return result;
+        }
         resp.append(rb, br);
         bodyHave += br;
     }
     OCSP_CLOSE_SOCKET(sock);
 
     const unsigned char* bodyPtr = (const unsigned char*)resp.data() + he + 4;
-    long bodyLen = (long)(resp.size() - he - 4);
-    if (bodyLen <= 0) {
+    long bodyLen = static_cast<long>(resp.size() - he - 4);
+    if (bodyLen != contentLength) {
         result.errorDetail = "Empty body";
         return result;
     }
 
     OCSP_RESPONSE* oresp = d2i_OCSP_RESPONSE(NULL, &bodyPtr, bodyLen);
-    if (!oresp) {
+    if (!oresp || bodyPtr != reinterpret_cast<const unsigned char*>(resp.data() + resp.size())) {
+        OCSP_RESPONSE_free(oresp);
         result.errorDetail = "Parse failed";
         return result;
     }
@@ -703,6 +1161,40 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
     if (!basic) {
         OCSP_RESPONSE_free(oresp);
         result.errorDetail = "Parse error";
+        return result;
+    }
+
+    X509_STORE* trustStore = X509_STORE_new();
+    if (trustStore == nullptr) {
+        OCSP_BASICRESP_free(basic);
+        OCSP_RESPONSE_free(oresp);
+        result.errorDetail = "Trust store allocation failed";
+        return result;
+    }
+    auto addRoot = [&](const char* pem) {
+        BIO* rootBio = BIO_new_mem_buf(pem, static_cast<int>(std::strlen(pem)));
+        X509* root = rootBio == nullptr ? nullptr : PEM_read_bio_X509(rootBio, nullptr, nullptr, nullptr);
+        BIO_free(rootBio);
+        const bool added = root != nullptr && X509_STORE_add_cert(trustStore, root) == 1;
+        X509_free(root);
+        return added;
+    };
+    STACK_OF(X509)* verificationCerts = sk_X509_new_null();
+    bool issuerAdded = verificationCerts != nullptr && X509_up_ref(issuer) == 1;
+    if (issuerAdded && sk_X509_push(verificationCerts, issuer) == 0) {
+        X509_free(issuer);
+        issuerAdded = false;
+    }
+    const bool responseTrusted = issuerAdded && addRoot(SigningAsset::s_szAppleRootCACert) &&
+                                 addRoot(SigningAsset::s_szAppleRootCACertG3) &&
+                                 OCSP_basic_verify(basic, verificationCerts, trustStore, 0) == 1;
+    if (verificationCerts != nullptr)
+        sk_X509_pop_free(verificationCerts, X509_free);
+    X509_STORE_free(trustStore);
+    if (!responseTrusted) {
+        OCSP_BASICRESP_free(basic);
+        OCSP_RESPONSE_free(oresp);
+        result.errorDetail = "Untrusted OCSP response signature";
         return result;
     }
 
@@ -725,6 +1217,12 @@ static OCSPResult PerformOCSP(X509* cert, X509* issuer) {
         return result;
     }
     OCSP_CERTID_free(lid);
+    if (OCSP_check_validity(tu, nu, 300, 86400) != 1) {
+        OCSP_BASICRESP_free(basic);
+        OCSP_RESPONSE_free(oresp);
+        result.errorDetail = "Stale or not-yet-valid OCSP response";
+        return result;
+    }
 
     switch (cs) {
     case V_OCSP_CERTSTATUS_GOOD:
@@ -781,7 +1279,9 @@ static void PrintCertInfo(X509* cert, const string& fileTypeStr, bool showSigned
     Logger::PrintV(">>> Serial:\t%s\n", serial.c_str());
     Logger::PrintV(">>> Issued:\t%s\n", issuedStr.c_str());
 
-    if (daysLeft < 0) {
+    if (X509_cmp_current_time(X509_get0_notBefore(cert)) > 0) {
+        Logger::ErrorV(">>> Expires:\t%s (CERTIFICATE NOT YET VALID)\n", expiresStr.c_str());
+    } else if (daysLeft < 0) {
         Logger::ErrorV(">>> Expires:\t%s (EXPIRED %d days ago)\n", expiresStr.c_str(), -daysLeft);
     } else if (daysLeft < 30) {
         Logger::WarnV(">>> Expires:\t%s (%d days remaining!)\n", expiresStr.c_str(), daysLeft);
@@ -884,8 +1384,7 @@ int CheckCertificate(const string& strFilePath, const string& strPassword) {
 
     PrintCertInfo(cert, fileTypeStr, showSigned, isSigned);
 
-    int daysLeft = DaysRemaining(X509_get0_notAfter(cert));
-    bool expired = (daysLeft < 0);
+    bool expired = !IsCurrentlyValid(cert);
 
     X509* issuer = NULL;
     if (ca && sk_X509_num(ca) > 0) {
@@ -900,14 +1399,7 @@ int CheckCertificate(const string& strFilePath, const string& strPassword) {
         Logger::Print(">>> OCSP:\tSkipped (non-WWDR issuer)\n");
         retCode = expired ? 2 : 0;
     } else {
-#ifdef _WIN32
-        WSADATA wsaData;
-        WSAStartup(MAKEWORD(2, 2), &wsaData);
-#endif
         OCSPResult ocspResult = PerformOCSP(cert, issuer);
-#ifdef _WIN32
-        WSACleanup();
-#endif
         retCode = PrintOCSPResult(ocspResult);
         if (expired && retCode == 0)
             retCode = 2;

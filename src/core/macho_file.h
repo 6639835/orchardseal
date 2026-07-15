@@ -29,14 +29,20 @@ class MachOFile {
     bool Sign(SigningAsset* signingAsset, bool force, std::string bundleId, std::string infoSha1,
               std::string infoSha256, const std::string& codeResourcesData);
     bool InjectDylib(bool weakInject, const char* dylibFile);
-    void RemoveDylibs(const std::set<std::string>& dylibs);
+    [[nodiscard]] bool RemoveDylibs(const std::set<std::string>& dylibs);
 
   private:
     bool OpenFile(const char* path, bool readOnly);
     bool CloseFile();
-    bool ReplaceAndReopen(const std::string& temporaryFile);
+    bool ReplaceAndReopen(std::string& temporaryFile);
     bool NewSlice(std::uint8_t* base, std::uint32_t length);
     bool ReallocateCodeSignatureSpace();
+    bool SignInPlace(SigningAsset* signingAsset, bool force, std::string bundleId, std::string infoSha1,
+                     std::string infoSha256, const std::string& codeResourcesData);
+    bool InjectDylibInPlace(bool weakInject, const char* dylibFile);
+    bool RemoveDylibsInPlace(const std::set<std::string>& dylibs);
+    bool CaptureOriginalForRollback();
+    bool RestorePendingOriginal();
 
     std::size_t mappedSize_ = 0;
     std::string filePath_;
@@ -44,4 +50,5 @@ class MachOFile {
     bool codeSignatureReallocated_ = false;
     bool readOnly_ = false;
     std::vector<std::unique_ptr<MachOSlice>> slices_;
+    std::string pendingOriginalFile_;
 };

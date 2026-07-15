@@ -3,7 +3,6 @@
 
 class CodeSignature {
   public:
-    static bool SlotGetCodeSlotsData(uint8_t* pSlotBase, uint8_t*& pCodeSlots, uint32_t& uCodeSlotsLength);
     static bool SlotBuildEntitlements(const string& strEntitlements, string& strOutput);
     static bool SlotBuildDerEntitlements(const string& strEntitlements, string& strOutput);
     static bool SlotBuildRequirements(const string& strBundleID, const string& strSubjectCN, string& strOutput);
@@ -18,17 +17,16 @@ class CodeSignature {
     static bool SlotBuildCMSSignature(SigningAsset* pSignAsset, const string& strCodeDirectorySlot,
                                       const string& strAltnateCodeDirectorySlot, string& strOutput);
 
-    static bool GetCodeSignatureCodeSlotsData(uint8_t* pCSBase, uint8_t*& pCodeSlots1, uint32_t& uCodeSlots1Length,
-                                              uint8_t*& pCodeSlots256, uint32_t& uCodeSlots256Length);
-    static bool GetCodeSignatureExistsCodeSlotsData(uint8_t* pCSBase, uint8_t*& pCodeSlots1Data,
+    static bool GetCodeSignatureExistsCodeSlotsData(uint8_t* pCSBase, uint32_t signatureSize, uint8_t*& pCodeSlots1Data,
                                                     uint32_t& uCodeSlots1DataLength, uint8_t*& pCodeSlots256Data,
                                                     uint32_t& uCodeSlots256DataLength);
-    static uint32_t GetCodeSignatureLength(uint8_t* pCSBase);
+    static uint32_t GetCodeSignatureLength(const uint8_t* pCSBase, uint32_t availableSize);
 
     static string _DER(const jvalue& data);
+    static bool _DERChecked(const jvalue& data, string& output);
     static void _DERLength(string& strBlob, uint64_t uLength);
 
-    static bool ParseCodeSignature(uint8_t* pCSBase);
+    static bool ParseCodeSignature(uint8_t* pCSBase, uint32_t availableSize);
     static bool SlotParseEntitlements(uint8_t* pSlotBase, CS_BlobIndex* pbi);
     static bool SlotParseDerEntitlements(uint8_t* pSlotBase, CS_BlobIndex* pbi);
     static bool SlotParseCodeDirectory(uint8_t* pSlotBase, CS_BlobIndex* pbi);

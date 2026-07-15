@@ -4,6 +4,7 @@
 #include "code_signature.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -22,6 +23,76 @@ namespace {
         return offset < commandSize && std::memchr(command + offset, '\0', commandSize - offset) != nullptr;
     }
 
+    bool WriteExclusiveReallocatedFile(const string& path, const uint8_t* data, size_t dataSize, size_t paddingSize) {
+#ifdef _WIN32
+        if (path.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+            return false;
+        const int wideLength =
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), static_cast<int>(path.size()), nullptr, 0);
+        if (wideLength <= 0)
+            return false;
+        std::wstring widePath(static_cast<size_t>(wideLength), L'\0');
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), static_cast<int>(path.size()),
+                                widePath.data(), wideLength) != wideLength)
+            return false;
+        HANDLE handle = CreateFileW(widePath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+            return false;
+        auto writeBytes = [&](const uint8_t* bytes, size_t count) {
+            while (count > 0) {
+                const DWORD chunk = static_cast<DWORD>(std::min<size_t>(count, 1U << 30));
+                DWORD written = 0;
+                if (::WriteFile(handle, bytes, chunk, &written, nullptr) == 0 || written != chunk)
+                    return false;
+                bytes += written;
+                count -= written;
+            }
+            return true;
+        };
+        const std::array<uint8_t, 4096> zeros{};
+        bool success = writeBytes(data, dataSize);
+        while (success && paddingSize > 0) {
+            const size_t chunk = std::min(paddingSize, zeros.size());
+            success = writeBytes(zeros.data(), chunk);
+            paddingSize -= chunk;
+        }
+        success = success && FlushFileBuffers(handle) != 0;
+        success = CloseHandle(handle) != 0 && success;
+        if (!success)
+            DeleteFileW(widePath.c_str());
+        return success;
+#else
+        const int descriptor = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        if (descriptor < 0)
+            return false;
+        auto writeBytes = [&](const uint8_t* bytes, size_t count) {
+            while (count > 0) {
+                const ssize_t written = write(descriptor, bytes, count);
+                if (written < 0 && errno == EINTR)
+                    continue;
+                if (written <= 0)
+                    return false;
+                bytes += written;
+                count -= static_cast<size_t>(written);
+            }
+            return true;
+        };
+        const std::array<uint8_t, 4096> zeros{};
+        bool success = writeBytes(data, dataSize);
+        while (success && paddingSize > 0) {
+            const size_t chunk = std::min(paddingSize, zeros.size());
+            success = writeBytes(zeros.data(), chunk);
+            paddingSize -= chunk;
+        }
+        success = success && fsync(descriptor) == 0;
+        success = close(descriptor) == 0 && success;
+        if (!success)
+            unlink(path.c_str());
+        return success;
+#endif
+    }
+
 } // namespace
 
 bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
@@ -30,6 +101,7 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
     codeLength_ = 0;
     signatureBase_ = nullptr;
     signatureLength_ = 0;
+    signatureCapacity_ = 0;
     infoPlist_.clear();
     encrypted_ = false;
     is64Bit_ = false;
@@ -74,6 +146,8 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
 
     std::uint8_t* command = base_ + headerSize_;
     const std::uint8_t* commandEnd = command + commandBytes;
+    std::uint32_t firstFileDataOffset = length_;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> fileSegments;
     for (std::uint32_t index = 0; index < commandCount; ++index) {
         if (static_cast<std::size_t>(commandEnd - command) < sizeof(load_command)) {
             return false;
@@ -93,6 +167,14 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
                 return false;
             }
             auto* segment = reinterpret_cast<segment_command*>(command);
+            const std::uint64_t segmentFileOffset = ByteOrder(segment->fileoff);
+            const std::uint64_t segmentFileSize = ByteOrder(segment->filesize);
+            if (!RangeFits(segmentFileOffset, segmentFileSize, length_))
+                return false;
+            if (segmentFileSize != 0)
+                fileSegments.emplace_back(segmentFileOffset, segmentFileSize);
+            if (segmentFileOffset != 0)
+                firstFileDataOffset = std::min(firstFileDataOffset, static_cast<uint32_t>(segmentFileOffset));
             const std::uint32_t sectionCount = ByteOrder(segment->nsects);
             if (sectionCount > (commandSize - sizeof(segment_command)) / sizeof(section)) {
                 return false;
@@ -105,6 +187,9 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
                         reinterpret_cast<section*>(command + sizeof(segment_command) + sizeof(section) * sectionIndex);
                     const std::uint32_t offset = ByteOrder(current->offset);
                     const std::uint32_t size = ByteOrder(current->size);
+                    if (offset != 0) {
+                        firstFileDataOffset = std::min(firstFileDataOffset, offset);
+                    }
                     if (FixedNameEquals(current->sectname, "__text")) {
                         if (!RangeFits(offset, size, length_)) {
                             return false;
@@ -132,6 +217,14 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
                 return false;
             }
             auto* segment = reinterpret_cast<segment_command_64*>(command);
+            const std::uint64_t segmentFileOffset = ByteOrder64(segment->fileoff);
+            const std::uint64_t segmentFileSize = ByteOrder64(segment->filesize);
+            if (!RangeFits(segmentFileOffset, segmentFileSize, length_))
+                return false;
+            if (segmentFileSize != 0)
+                fileSegments.emplace_back(segmentFileOffset, segmentFileSize);
+            if (segmentFileOffset != 0)
+                firstFileDataOffset = std::min(firstFileDataOffset, static_cast<uint32_t>(segmentFileOffset));
             const std::uint32_t sectionCount = ByteOrder(segment->nsects);
             if (sectionCount > (commandSize - sizeof(segment_command_64)) / sizeof(section_64)) {
                 return false;
@@ -144,6 +237,9 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
                                                                   sizeof(section_64) * sectionIndex);
                     const std::uint32_t offset = ByteOrder(current->offset);
                     const std::uint64_t size = ByteOrder64(current->size);
+                    if (offset != 0) {
+                        firstFileDataOffset = std::min(firstFileDataOffset, offset);
+                    }
                     if (FixedNameEquals(current->sectname, "__text")) {
                         if (!RangeFits(offset, size, length_)) {
                             return false;
@@ -192,6 +288,7 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
 
             codeSignatureSegment_ = command;
             codeLength_ = dataOffset;
+            signatureCapacity_ = dataSize;
             signatureBase_ = base_ + dataOffset;
             if (dataSize >= sizeof(CS_SuperBlob)) {
                 CS_SuperBlob superBlob{};
@@ -200,6 +297,24 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
                     const std::uint32_t embeddedLength = LE(superBlob.length);
                     if (embeddedLength < sizeof(CS_SuperBlob) || embeddedLength > dataSize) {
                         return false;
+                    }
+                    const std::uint32_t blobCount = LE(superBlob.count);
+                    if (blobCount > 64 || blobCount > (embeddedLength - sizeof(CS_SuperBlob)) / sizeof(CS_BlobIndex))
+                        return false;
+                    const std::uint32_t indexEnd =
+                        static_cast<std::uint32_t>(sizeof(CS_SuperBlob) + blobCount * sizeof(CS_BlobIndex));
+                    for (std::uint32_t blob = 0; blob < blobCount; ++blob) {
+                        CS_BlobIndex index{};
+                        std::memcpy(&index, signatureBase_ + sizeof(CS_SuperBlob) + blob * sizeof(index),
+                                    sizeof(index));
+                        const std::uint32_t slotOffset = LE(index.offset);
+                        if (slotOffset < indexEnd || slotOffset > embeddedLength || embeddedLength - slotOffset < 8)
+                            return false;
+                        std::uint32_t encodedSlotLength = 0;
+                        std::memcpy(&encodedSlotLength, signatureBase_ + slotOffset + 4, sizeof(encodedSlotLength));
+                        const std::uint32_t slotLength = LE(encodedSlotLength);
+                        if (slotLength < 8 || slotLength > embeddedLength - slotOffset)
+                            return false;
                     }
                     signatureLength_ = embeddedLength;
                 }
@@ -244,7 +359,43 @@ bool MachOSlice::Init(std::uint8_t* base, std::uint32_t length) {
         command += commandSize;
     }
 
-    return command == commandEnd;
+    if (command != commandEnd) {
+        return false;
+    }
+
+    const std::uint32_t commandsEndOffset = headerSize_ + commandBytes;
+    loadCommandsFreeSpace_ = firstFileDataOffset >= commandsEndOffset ? firstFileDataOffset - commandsEndOffset : 0;
+
+    if (codeSignatureSegment_ != nullptr) {
+        if (codeLength_ < commandsEndOffset || linkEditSegment_ == nullptr) {
+            return false;
+        }
+        const auto* linkCommand = reinterpret_cast<const load_command*>(linkEditSegment_);
+        std::uint64_t fileOffset = 0;
+        std::uint64_t fileSize = 0;
+        if (ByteOrder(linkCommand->cmd) == LC_SEGMENT) {
+            const auto* segment = reinterpret_cast<const segment_command*>(linkEditSegment_);
+            fileOffset = ByteOrder(segment->fileoff);
+            fileSize = ByteOrder(segment->filesize);
+        } else if (ByteOrder(linkCommand->cmd) == LC_SEGMENT_64) {
+            const auto* segment = reinterpret_cast<const segment_command_64*>(linkEditSegment_);
+            fileOffset = ByteOrder64(segment->fileoff);
+            fileSize = ByteOrder64(segment->filesize);
+        } else {
+            return false;
+        }
+        if (codeLength_ < fileOffset || !RangeFits(codeLength_ - fileOffset, signatureCapacity_, fileSize) ||
+            static_cast<std::uint64_t>(codeLength_) + signatureCapacity_ != fileOffset + fileSize) {
+            return false;
+        }
+    }
+    std::sort(fileSegments.begin(), fileSegments.end());
+    for (size_t index = 1; index < fileSegments.size(); ++index) {
+        const auto& previous = fileSegments[index - 1];
+        if (previous.first + previous.second > fileSegments[index].first)
+            return false;
+    }
+    return true;
 }
 
 const char* MachOSlice::GetArchitecture(int cpuType, int cpuSubType) const {
@@ -453,7 +604,7 @@ void MachOSlice::PrintInfo() {
     if (NULL == signatureBase_ || signatureLength_ <= 0) {
         Logger::Warn(">>> Can't find CodeSignature segment!\n");
     } else {
-        CodeSignature::ParseCodeSignature(signatureBase_);
+        CodeSignature::ParseCodeSignature(signatureBase_, signatureLength_);
     }
 
     Logger::Print("------------------------------------------------------------------\n");
@@ -463,6 +614,8 @@ bool MachOSlice::BuildCodeSignature(SigningAsset* pSignAsset, bool bForce, const
                                     const string& strInfoSHA1, const string& strInfoSHA256,
                                     const string& strCodeResourcesSHA1, const string& strCodeResourcesSHA256,
                                     string& strOutput) {
+    if (pSignAsset == nullptr)
+        return false;
     string strRequirementsSlot;
     string strEntitlementsSlot;
     string strDerEntitlementsSlot;
@@ -470,10 +623,13 @@ bool MachOSlice::BuildCodeSignature(SigningAsset* pSignAsset, bool bForce, const
     string strEmptyEntitlements =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
         "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
-    CodeSignature::SlotBuildRequirements(strBundleId, pSignAsset->SubjectCommonName(), strRequirementsSlot);
-    CodeSignature::SlotBuildEntitlements(IsExecute() ? pSignAsset->EntitlementsData() : strEmptyEntitlements,
-                                         strEntitlementsSlot);
-    CodeSignature::SlotBuildDerEntitlements(IsExecute() ? pSignAsset->EntitlementsData() : "", strDerEntitlementsSlot);
+    const string entitlementInput = IsExecute() ? pSignAsset->EntitlementsData() : strEmptyEntitlements;
+    const string derEntitlementInput = IsExecute() ? pSignAsset->EntitlementsData() : "";
+    if (!CodeSignature::SlotBuildRequirements(strBundleId, pSignAsset->SubjectCommonName(), strRequirementsSlot) ||
+        (!entitlementInput.empty() && !CodeSignature::SlotBuildEntitlements(entitlementInput, strEntitlementsSlot)) ||
+        (!derEntitlementInput.empty() &&
+         !CodeSignature::SlotBuildDerEntitlements(derEntitlementInput, strDerEntitlementsSlot)))
+        return false;
 
     string strRequirementsSlotSHA1;
     string strRequirementsSlotSHA256;
@@ -507,8 +663,9 @@ bool MachOSlice::BuildCodeSignature(SigningAsset* pSignAsset, bool bForce, const
     uint32_t uCodeSlots1DataLength = 0;
     uint32_t uCodeSlots256DataLength = 0;
     if (!bForce) {
-        CodeSignature::GetCodeSignatureExistsCodeSlotsData(signatureBase_, pCodeSlots1Data, uCodeSlots1DataLength,
-                                                           pCodeSlots256Data, uCodeSlots256DataLength);
+        CodeSignature::GetCodeSignatureExistsCodeSlotsData(signatureBase_, signatureLength_, pCodeSlots1Data,
+                                                           uCodeSlots1DataLength, pCodeSlots256Data,
+                                                           uCodeSlots256DataLength);
     }
 
     uint64_t uExecSegFlags = 0;
@@ -572,6 +729,12 @@ bool MachOSlice::BuildCodeSignature(SigningAsset* pSignAsset, bool bForce, const
         }
     }
 
+    const std::uint64_t totalPayloadLength = static_cast<std::uint64_t>(strCodeDirectorySlot.size()) +
+                                             strRequirementsSlot.size() + strEntitlementsSlot.size() +
+                                             strDerEntitlementsSlot.size() + strAltnateCodeDirectorySlot.size() +
+                                             strCMSSignatureSlot.size();
+    if (totalPayloadLength > std::numeric_limits<std::uint32_t>::max())
+        return false;
     uint32_t uCodeDirectorySlotLength = (uint32_t)strCodeDirectorySlot.size();
     uint32_t uRequirementsSlotLength = (uint32_t)strRequirementsSlot.size();
     uint32_t uEntitlementsSlotLength = (uint32_t)strEntitlementsSlot.size();
@@ -587,10 +750,12 @@ bool MachOSlice::BuildCodeSignature(SigningAsset* pSignAsset, bool bForce, const
     uCodeSignBlobCount += (uAltnateCodeDirectorySlotLength > 0) ? 1 : 0;
     uCodeSignBlobCount += (uCMSSignatureSlotLength > 0) ? 1 : 0;
 
-    uint32_t uSuperBlobHeaderLength = sizeof(CS_SuperBlob) + uCodeSignBlobCount * sizeof(CS_BlobIndex);
-    uint32_t uCodeSignLength = uSuperBlobHeaderLength + uCodeDirectorySlotLength + uRequirementsSlotLength +
-                               uEntitlementsSlotLength + uDerEntitlementsLength + uAltnateCodeDirectorySlotLength +
-                               uCMSSignatureSlotLength;
+    const std::uint64_t superBlobHeaderLength64 =
+        sizeof(CS_SuperBlob) + static_cast<std::uint64_t>(uCodeSignBlobCount) * sizeof(CS_BlobIndex);
+    if (superBlobHeaderLength64 + totalPayloadLength > std::numeric_limits<std::uint32_t>::max())
+        return false;
+    const uint32_t uSuperBlobHeaderLength = static_cast<uint32_t>(superBlobHeaderLength64);
+    const uint32_t uCodeSignLength = static_cast<uint32_t>(superBlobHeaderLength64 + totalPayloadLength);
 
     vector<CS_BlobIndex> arrBlobIndexes;
     if (uCodeDirectorySlotLength > 0) {
@@ -661,13 +826,17 @@ bool MachOSlice::BuildCodeSignature(SigningAsset* pSignAsset, bool bForce, const
         FileSystem::WriteFile("./.orchardseal_debug/Requirements.slot.new", strRequirementsSlot);
         FileSystem::WriteFile("./.orchardseal_debug/Entitlements.slot.new", strEntitlementsSlot);
         FileSystem::WriteFile("./.orchardseal_debug/Entitlements.der.slot.new", strDerEntitlementsSlot);
-        FileSystem::WriteFile("./.orchardseal_debug/Entitlements.plist.new", strEntitlementsSlot.data() + 8,
-                              strEntitlementsSlot.size() - 8);
+        if (strEntitlementsSlot.size() >= 8) {
+            FileSystem::WriteFile("./.orchardseal_debug/Entitlements.plist.new", strEntitlementsSlot.data() + 8,
+                                  strEntitlementsSlot.size() - 8);
+        }
         FileSystem::WriteFile("./.orchardseal_debug/CodeDirectory_SHA1.slot.new", strCodeDirectorySlot);
         FileSystem::WriteFile("./.orchardseal_debug/CodeDirectory_SHA256.slot.new", strAltnateCodeDirectorySlot);
         FileSystem::WriteFile("./.orchardseal_debug/CMSSignature.slot.new", strCMSSignatureSlot);
-        FileSystem::WriteFile("./.orchardseal_debug/CMSSignature.der.new", strCMSSignatureSlot.data() + 8,
-                              strCMSSignatureSlot.size() - 8);
+        if (strCMSSignatureSlot.size() >= 8) {
+            FileSystem::WriteFile("./.orchardseal_debug/CMSSignature.der.new", strCMSSignatureSlot.data() + 8,
+                                  strCMSSignatureSlot.size() - 8);
+        }
         FileSystem::WriteFile("./.orchardseal_debug/CodeSignature.blob.new", strOutput);
     }
 
@@ -698,24 +867,26 @@ bool MachOSlice::Sign(SigningAsset* pSignAsset, bool bForce, const string& strBu
         return false;
     }
 
-    int nSpaceLength = (int)length_ - (int)codeLength_ - (int)strCodeSignBlob.size();
-    if (nSpaceLength < 0) {
+    if (strCodeSignBlob.size() > signatureCapacity_) {
         hasEnoughSpace_ = false;
-        Logger::WarnV(">>> No enough CodeSignature space (now: %d, need: %d).\n", (int)length_ - (int)codeLength_,
+        Logger::WarnV(">>> No enough CodeSignature space (now: %d, need: %d).\n", (int)signatureCapacity_,
                       (int)strCodeSignBlob.size());
         return false;
     }
 
     memcpy(base_ + codeLength_, strCodeSignBlob.data(), strCodeSignBlob.size());
-    // memset(base_ + codeLength_ + strCodeSignBlob.size(), 0, nSpaceLength);
+    std::memset(base_ + codeLength_ + strCodeSignBlob.size(), 0, signatureCapacity_ - strCodeSignBlob.size());
+    signatureLength_ = static_cast<std::uint32_t>(strCodeSignBlob.size());
     return true;
 }
 
 uint32_t MachOSlice::ReallocCodeSignSpace(const string& strNewFile) {
-    FileSystem::RemoveFile(strNewFile.c_str());
-
-    uint32_t uNewLength =
-        codeLength_ + Utility::ByteAlign(((codeLength_ / 4096) + 1) * (20 + 32), 4096) + 32768; // 32K Should Be Enough
+    const std::uint64_t estimatedHashes = (static_cast<std::uint64_t>(codeLength_) / 4096 + 1) * (20 + 32);
+    const std::uint64_t alignedHashes = (estimatedHashes + 4095) & ~std::uint64_t(4095);
+    const std::uint64_t calculatedLength = static_cast<std::uint64_t>(codeLength_) + alignedHashes + 32768;
+    if (calculatedLength > std::numeric_limits<std::uint32_t>::max())
+        return 0;
+    const uint32_t uNewLength = static_cast<uint32_t>(calculatedLength);
     if (NULL == linkEditSegment_ || uNewLength <= length_) {
         return 0;
     }
@@ -724,23 +895,34 @@ uint32_t MachOSlice::ReallocCodeSignSpace(const string& strNewFile) {
     switch (ByteOrder(pseglc->cmd)) {
     case LC_SEGMENT: {
         segment_command* seglc = (segment_command*)linkEditSegment_;
-        seglc->vmsize = Utility::ByteAlign(ByteOrder(seglc->vmsize) + (uNewLength - length_), 4096);
-        seglc->vmsize = ByteOrder(seglc->vmsize);
-        seglc->filesize = uNewLength - ByteOrder(seglc->fileoff);
-        seglc->filesize = ByteOrder(seglc->filesize);
+        const std::uint64_t oldVmSize = ByteOrder(seglc->vmsize);
+        const std::uint64_t fileOffset = ByteOrder(seglc->fileoff);
+        const std::uint64_t grownVmSize = oldVmSize + (uNewLength - length_);
+        if (grownVmSize > std::numeric_limits<std::uint32_t>::max() - 4095 || fileOffset > uNewLength)
+            return 0;
+        seglc->vmsize = ByteOrder(static_cast<uint32_t>((grownVmSize + 4095) & ~std::uint64_t(4095)));
+        seglc->filesize = ByteOrder(static_cast<uint32_t>(uNewLength - fileOffset));
     } break;
     case LC_SEGMENT_64: {
         segment_command_64* seglc = (segment_command_64*)linkEditSegment_;
-        seglc->vmsize = Utility::ByteAlign(ByteOrder((uint32_t)seglc->vmsize) + (uNewLength - length_), 4096);
-        seglc->vmsize = ByteOrder((uint32_t)seglc->vmsize);
-        seglc->filesize = uNewLength - ByteOrder((uint32_t)seglc->fileoff);
-        seglc->filesize = ByteOrder((uint32_t)seglc->filesize);
+        const std::uint64_t oldVmSize = ByteOrder64(seglc->vmsize);
+        const std::uint64_t fileOffset = ByteOrder64(seglc->fileoff);
+        const std::uint64_t growth = uNewLength - length_;
+        if (oldVmSize > std::numeric_limits<std::uint64_t>::max() - growth || fileOffset > uNewLength) {
+            return 0;
+        }
+        const std::uint64_t grownVmSize = oldVmSize + growth;
+        if (grownVmSize > std::numeric_limits<std::uint64_t>::max() - 4095) {
+            return 0;
+        }
+        seglc->vmsize = ByteOrder64((grownVmSize + 4095) & ~std::uint64_t(4095));
+        seglc->filesize = ByteOrder64(static_cast<std::uint64_t>(uNewLength) - fileOffset);
     } break;
     }
 
     codesignature_command* pcslc = (codesignature_command*)codeSignatureSegment_;
     if (NULL == pcslc) {
-        if (loadCommandsFreeSpace_ < 4) {
+        if (loadCommandsFreeSpace_ < sizeof(codesignature_command)) {
             Logger::Error(">>> Can't find free space of LoadCommands for CodeSignature!\n");
             return 0;
         }
@@ -754,22 +936,14 @@ uint32_t MachOSlice::ReallocCodeSignSpace(const string& strNewFile) {
     }
     pcslc->datasize = ByteOrder(uNewLength - codeLength_);
 
-    if (!FileSystem::AppendFile(strNewFile.c_str(), (const char*)base_, length_)) {
+    if (!WriteExclusiveReallocatedFile(strNewFile, base_, length_, uNewLength - length_))
         return 0;
-    }
-
-    string strPadding;
-    strPadding.append(uNewLength - length_, 0);
-    if (!FileSystem::AppendFile(strNewFile.c_str(), strPadding)) {
-        FileSystem::RemoveFile(strNewFile.c_str());
-        return 0;
-    }
 
     return uNewLength;
 }
 
 bool MachOSlice::InjectDylib(bool bWeakInject, const char* szDylibFile) {
-    if (NULL == header_) {
+    if (NULL == header_ || szDylibFile == nullptr) {
         return false;
     }
 
@@ -794,10 +968,15 @@ bool MachOSlice::InjectDylib(bool bWeakInject, const char* szDylibFile) {
         pLoadCommand += ByteOrder(plc->cmdsize);
     }
 
-    uint32_t uDylibFileLength = (uint32_t)strlen(szDylibFile);
+    const size_t dylibFileLength = std::strlen(szDylibFile);
+    if (dylibFileLength == 0 ||
+        dylibFileLength > std::numeric_limits<std::uint32_t>::max() - sizeof(dylib_command) - 8) {
+        return false;
+    }
+    uint32_t uDylibFileLength = static_cast<uint32_t>(dylibFileLength);
     uint32_t uDylibFilePadding = (8 - uDylibFileLength % 8);
     uint32_t uDylibCommandSize = sizeof(dylib_command) + uDylibFileLength + uDylibFilePadding;
-    if (loadCommandsFreeSpace_ > 0 && loadCommandsFreeSpace_ < uDylibCommandSize) { // some bin doesn't have '__text'
+    if (loadCommandsFreeSpace_ < uDylibCommandSize) {
         Logger::Error(">>> Can't find free space of LoadCommands for LC_LOAD_DYLIB or LC_LOAD_WEAK_DYLIB!\n");
         return false;
     }
@@ -823,16 +1002,16 @@ bool MachOSlice::InjectDylib(bool bWeakInject, const char* szDylibFile) {
     return true;
 }
 
-void MachOSlice::RemoveDylibs(const set<string>& dylibs) {
+bool MachOSlice::RemoveDylibs(const set<string>& dylibs) {
     if (header_ == nullptr || base_ == nullptr || dylibs.empty()) {
-        return;
+        return header_ != nullptr && base_ != nullptr;
     }
 
     const std::uint32_t commandCount = ByteOrder(header_->ncmds);
     const std::uint32_t commandBytes = ByteOrder(header_->sizeofcmds);
     if (!RangeFits(headerSize_, commandBytes, length_)) {
         Logger::Error(">>> Invalid Mach-O load-command range.\n");
-        return;
+        return false;
     }
 
     std::vector<std::uint8_t> rebuilt(commandBytes, 0);
@@ -848,21 +1027,21 @@ void MachOSlice::RemoveDylibs(const set<string>& dylibs) {
         if (commandSize < sizeof(load_command) ||
             !RangeFits(static_cast<std::uint64_t>(command - (base_ + headerSize_)), commandSize, commandBytes)) {
             Logger::Error(">>> Invalid Mach-O load command while removing dylibs.\n");
-            return;
+            return false;
         }
 
         bool removeCommand = false;
         if (commandType == LC_LOAD_DYLIB || commandType == LC_LOAD_WEAK_DYLIB) {
             if (commandSize < sizeof(dylib_command)) {
                 Logger::Error(">>> Invalid dylib load command.\n");
-                return;
+                return false;
             }
 
             auto* dylibCommand = reinterpret_cast<dylib_command*>(command);
             const std::uint32_t nameOffset = ByteOrder(dylibCommand->dylib.name.offset);
             if (!ContainsTerminatedString(command, commandSize, nameOffset)) {
                 Logger::Error(">>> Invalid dylib name in load command.\n");
-                return;
+                return false;
             }
 
             const char* dylibPath = reinterpret_cast<const char*>(command + nameOffset);
@@ -881,7 +1060,7 @@ void MachOSlice::RemoveDylibs(const set<string>& dylibs) {
     }
 
     if (removedCount == 0) {
-        return;
+        return true;
     }
 
     std::uint8_t* loadCommandStart = base_ + headerSize_;
@@ -894,4 +1073,5 @@ void MachOSlice::RemoveDylibs(const set<string>& dylibs) {
         removedBytes <= std::numeric_limits<std::uint32_t>::max() - loadCommandsFreeSpace_) {
         loadCommandsFreeSpace_ += removedBytes;
     }
+    return true;
 }

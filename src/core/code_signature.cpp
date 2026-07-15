@@ -4,7 +4,25 @@
 #include "signing_asset.h"
 #include "code_signature.h"
 #include <algorithm>
+#include <cstring>
+#include <limits>
+#include <cstddef>
 #include <openssl/sha.h>
+
+namespace {
+    constexpr uint32_t kMaximumCodeSignatureBlobCount = 64;
+    std::size_t CodeDirectoryHeaderSize(std::uint32_t version) {
+        if (version >= 0x20400)
+            return sizeof(CS_CodeDirectory);
+        if (version >= 0x20300)
+            return offsetof(CS_CodeDirectory, execSegBase);
+        if (version >= 0x20200)
+            return offsetof(CS_CodeDirectory, spare3);
+        if (version >= 0x20100)
+            return offsetof(CS_CodeDirectory, teamOffset);
+        return offsetof(CS_CodeDirectory, scatterOffset);
+    }
+} // namespace
 
 void CodeSignature::_DERLength(string& strBlob, uint64_t uLength) {
     if (uLength < 128) {
@@ -20,21 +38,36 @@ void CodeSignature::_DERLength(string& strBlob, uint64_t uLength) {
 }
 
 string CodeSignature::_DER(const jvalue& data) {
-    string strOutput;
+    string output;
+    if (!_DERChecked(data, output))
+        output.clear();
+    return output;
+}
+
+bool CodeSignature::_DERChecked(const jvalue& data, string& strOutput) {
+    strOutput.clear();
     if (data.is_bool()) {
         strOutput.append(1, 0x01);
         strOutput.append(1, 1);
         strOutput.append(1, data.as_bool() ? (char)0xff : (char)0x00);
     } else if (data.is_int()) {
-        uint64_t uVal = data.as_int64();
+        const int64_t value = data.as_int64();
+        uint64_t bits = static_cast<uint64_t>(value);
+        unsigned byteCount = sizeof(bits);
+        while (byteCount > 1) {
+            const uint8_t leading = static_cast<uint8_t>(bits >> ((byteCount - 1) * 8));
+            const uint8_t next = static_cast<uint8_t>(bits >> ((byteCount - 2) * 8));
+            if ((leading == 0x00 && (next & 0x80) == 0) || (leading == 0xff && (next & 0x80) != 0)) {
+                --byteCount;
+            } else {
+                break;
+            }
+        }
         strOutput.append(1, 0x02);
-        _DERLength(strOutput, uVal);
-
-        uint32_t sLength = (64 - Utility::builtin_clzll(uVal) + 7) / 8;
-        sLength *= 8;
-        do {
-            strOutput.append(1, (char)(uVal >> (sLength -= 8)));
-        } while (sLength != 0);
+        _DERLength(strOutput, byteCount);
+        for (unsigned byte = byteCount; byte > 0; --byte) {
+            strOutput.append(1, static_cast<char>(bits >> ((byte - 1) * 8)));
+        }
     } else if (data.is_string()) {
         string strVal = data.as_cstr();
         strOutput.append(1, 0x0c);
@@ -44,7 +77,10 @@ string CodeSignature::_DER(const jvalue& data) {
         string strArray;
         size_t size = data.size();
         for (size_t i = 0; i < size; i++) {
-            strArray += _DER(data[i]);
+            string item;
+            if (!_DERChecked(data[i], item) || item.size() > std::numeric_limits<uint32_t>::max() - strArray.size())
+                return false;
+            strArray += item;
         }
         strOutput.append(1, 0x30);
         _DERLength(strOutput, strArray.size());
@@ -57,7 +93,9 @@ string CodeSignature::_DER(const jvalue& data) {
         string strDict;
         for (size_t i = 0; i < arrKeys.size(); i++) {
             string& strKey = arrKeys[i];
-            string strVal = _DER(data[strKey]);
+            string strVal;
+            if (!_DERChecked(data[strKey], strVal))
+                return false;
 
             string strEntry;
             strEntry.append(1, 0x0c);
@@ -67,31 +105,30 @@ string CodeSignature::_DER(const jvalue& data) {
 
             strDict.append(1, 0x30);
             _DERLength(strDict, strEntry.size());
+            if (strEntry.size() > std::numeric_limits<uint32_t>::max() - strDict.size())
+                return false;
             strDict += strEntry;
         }
 
         strOutput.append(1, (char)0xb0);
         _DERLength(strOutput, strDict.size());
         strOutput += strDict;
-    } else if (data.is_double()) {
-        assert(false);
-    } else if (data.is_date()) {
-        assert(false);
-    } else if (data.is_data()) {
-        assert(false);
     } else {
-        assert(false && "Unsupported Entitlements DER Type");
+        return false;
     }
-
-    return strOutput;
+    return strOutput.size() <= std::numeric_limits<uint32_t>::max();
 }
 
 uint32_t CodeSignature::SlotParseGeneralHeader(const char* szSlotName, uint8_t* pSlotBase, CS_BlobIndex* pbi) {
-    uint32_t uSlotLength = LE(*(((uint32_t*)pSlotBase) + 1));
+    uint32_t magic = 0;
+    uint32_t encodedLength = 0;
+    std::memcpy(&magic, pSlotBase, sizeof(magic));
+    std::memcpy(&encodedLength, pSlotBase + sizeof(magic), sizeof(encodedLength));
+    const uint32_t uSlotLength = LE(encodedLength);
     Logger::PrintV("\n  > %s: \n", szSlotName);
     Logger::PrintV("\ttype: \t\t0x%x\n", LE(pbi->type));
     Logger::PrintV("\toffset: \t%u\n", LE(pbi->offset));
-    Logger::PrintV("\tmagic: \t\t0x%x\n", LE(*((uint32_t*)pSlotBase)));
+    Logger::PrintV("\tmagic: \t\t0x%x\n", LE(magic));
     Logger::PrintV("\tlength: \t%u\n", uSlotLength);
     return uSlotLength;
 }
@@ -109,19 +146,35 @@ bool CodeSignature::SlotParseRequirements(uint8_t* pSlotBase, CS_BlobIndex* pbi)
 
 #ifndef _WIN32
     if (FileSystem::IsFileExists("/usr/bin/csreq")) {
-        string strTempFile;
-        Utility::StringFormatV(strTempFile, "/tmp/Requirements_%llu.blob", Utility::GetMicroSecond());
-        FileSystem::WriteFile(strTempFile.c_str(), (const char*)pSlotBase, uSlotLength);
-
-        string strCommand;
-        Utility::StringFormatV(strCommand, "/usr/bin/csreq -r '%s' -t ", strTempFile.c_str());
-        char result[1024] = {0};
-        FILE* cmd = popen(strCommand.c_str(), "r");
-        while (NULL != fgets(result, sizeof(result), cmd)) {
-            printf("\treqtext: \t%s", result);
+        char temporaryPath[] = "/tmp/orchardseal-requirements-XXXXXX";
+        const int descriptor = mkstemp(temporaryPath);
+        bool writtenSuccessfully = descriptor >= 0;
+        size_t written = 0;
+        while (writtenSuccessfully && written < uSlotLength) {
+            const ssize_t result = write(descriptor, pSlotBase + written, uSlotLength - written);
+            if (result < 0 && errno == EINTR)
+                continue;
+            if (result <= 0) {
+                writtenSuccessfully = false;
+                break;
+            }
+            written += static_cast<size_t>(result);
         }
-        pclose(cmd);
-        FileSystem::RemoveFile(strTempFile.c_str());
+        if (descriptor >= 0 && close(descriptor) != 0)
+            writtenSuccessfully = false;
+        if (writtenSuccessfully) {
+            const string command = string("/usr/bin/csreq -r ") + temporaryPath + " -t";
+            char result[1024] = {0};
+            FILE* process = popen(command.c_str(), "r");
+            if (process != nullptr) {
+                while (fgets(result, sizeof(result), process) != nullptr) {
+                    Logger::PrintV("\treqtext: \t%s", result);
+                }
+                pclose(process);
+            }
+        }
+        if (descriptor >= 0)
+            unlink(temporaryPath);
     }
 #endif
 
@@ -289,6 +342,8 @@ bool CodeSignature::SlotBuildEntitlements(const string& strEntitlements, string&
         return false;
     }
 
+    if (strEntitlements.size() > std::numeric_limits<uint32_t>::max() - 8U)
+        return false;
     uint32_t uMagic = BE((uint32_t)CSMAGIC_EMBEDDED_ENTITLEMENTS);
     uint32_t uLength = BE((uint32_t)strEntitlements.size() + 8);
 
@@ -306,9 +361,12 @@ bool CodeSignature::SlotBuildDerEntitlements(const string& strEntitlements, stri
     }
 
     jvalue jvInfo;
-    jvInfo.read_plist(strEntitlements);
+    if (!jvInfo.read_plist(strEntitlements))
+        return false;
 
-    string strInnerDict = _DER(jvInfo);
+    string strInnerDict;
+    if (!_DERChecked(jvInfo, strInnerDict))
+        return false;
 
     string strVersion;
     strVersion.append(1, 0x02);
@@ -322,6 +380,8 @@ bool CodeSignature::SlotBuildDerEntitlements(const string& strEntitlements, stri
     _DERLength(strRawEntitlementsData, strBody.size());
     strRawEntitlementsData += strBody;
 
+    if (strRawEntitlementsData.size() > std::numeric_limits<uint32_t>::max() - 8U)
+        return false;
     uint32_t uMagic = BE((uint32_t)CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
     uint32_t uLength = BE((uint32_t)strRawEntitlementsData.size() + 8);
 
@@ -338,16 +398,9 @@ bool CodeSignature::SlotParseCodeDirectory(uint8_t* pSlotBase, CS_BlobIndex* pbi
         return false;
     }
 
-    vector<uint8_t*> arrCodeSlots;
-    vector<uint8_t*> arrSpecialSlots;
-    CS_CodeDirectory cdHeader = *((CS_CodeDirectory*)pSlotBase);
+    CS_CodeDirectory cdHeader{};
+    std::memcpy(&cdHeader, pSlotBase, std::min<std::size_t>(uSlotLength, sizeof(cdHeader)));
     uint8_t* pHashes = pSlotBase + LE(cdHeader.hashOffset);
-    for (uint32_t i = 0; i < LE(cdHeader.nCodeSlots); i++) {
-        arrCodeSlots.push_back(pHashes + cdHeader.hashSize * i);
-    }
-    for (uint32_t i = 0; i < LE(cdHeader.nSpecialSlots); i++) {
-        arrSpecialSlots.push_back(pHashes - cdHeader.hashSize * (i + 1));
-    }
 
     Logger::PrintV("\tversion: \t0x%x\n", LE(cdHeader.version));
     Logger::PrintV("\tflags: \t\t%u\n", LE(cdHeader.flags));
@@ -381,11 +434,13 @@ bool CodeSignature::SlotParseCodeDirectory(uint8_t* pSlotBase, CS_BlobIndex* pbi
 
     Logger::PrintV("\tidentifier: \t%s\n", pSlotBase + LE(cdHeader.identOffset));
     if (uVersion >= 0x20200) {
-        Logger::PrintV("\tteamid: \t%s\n", pSlotBase + LE(cdHeader.teamOffset));
+        const uint32_t teamOffset = LE(cdHeader.teamOffset);
+        Logger::PrintV("\tteamid: \t%s\n", teamOffset == 0 ? "" : reinterpret_cast<char*>(pSlotBase + teamOffset));
     }
 
     Logger::PrintV("\tSpecialSlots:\n");
-    for (int i = LE(cdHeader.nSpecialSlots) - 1; i >= 0; i--) {
+    for (uint32_t remaining = LE(cdHeader.nSpecialSlots); remaining > 0; --remaining) {
+        const uint32_t i = remaining - 1;
         const char* suffix = "\t\n";
         switch (i) {
         case 0:
@@ -407,13 +462,13 @@ bool CodeSignature::SlotParseCodeDirectory(uint8_t* pSlotBase, CS_BlobIndex* pbi
             suffix = "\tEntitlements(DER) Slot\n";
             break;
         }
-        Hash::Print("\t\t\t", arrSpecialSlots[i], cdHeader.hashSize, suffix);
+        Hash::Print("\t\t\t", pHashes - cdHeader.hashSize * (i + 1), cdHeader.hashSize, suffix);
     }
 
     if (Logger::IsDebug()) {
         Logger::Print("\tCodeSlots:\n");
         for (uint32_t i = 0; i < LE(cdHeader.nCodeSlots); i++) {
-            Hash::Print("\t\t\t", arrCodeSlots[i], cdHeader.hashSize);
+            Hash::Print("\t\t\t", pHashes + cdHeader.hashSize * i, cdHeader.hashSize);
         }
     } else {
         Logger::Print("\tCodeSlots: \tomitted. (use -d option for details)\n");
@@ -712,29 +767,80 @@ bool CodeSignature::SlotBuildCMSSignature(SigningAsset* pSignAsset, const string
     return true;
 }
 
-uint32_t CodeSignature::GetCodeSignatureLength(uint8_t* pCSBase) {
-    CS_SuperBlob* psb = (CS_SuperBlob*)pCSBase;
-    if (NULL != psb && CSMAGIC_EMBEDDED_SIGNATURE == LE(psb->magic)) {
-        return LE(psb->length);
+uint32_t CodeSignature::GetCodeSignatureLength(const uint8_t* pCSBase, uint32_t availableSize) {
+    if (pCSBase != nullptr && availableSize >= sizeof(CS_SuperBlob)) {
+        CS_SuperBlob header{};
+        std::memcpy(&header, pCSBase, sizeof(header));
+        const uint32_t length = LE(header.length);
+        if (CSMAGIC_EMBEDDED_SIGNATURE == LE(header.magic) && length >= sizeof(header) && length <= availableSize) {
+            return length;
+        }
     }
     return 0;
 }
 
-bool CodeSignature::ParseCodeSignature(uint8_t* pCSBase) {
-    CS_SuperBlob* psb = (CS_SuperBlob*)pCSBase;
-    if (NULL == psb || CSMAGIC_EMBEDDED_SIGNATURE != LE(psb->magic)) {
+bool CodeSignature::ParseCodeSignature(uint8_t* pCSBase, uint32_t availableSize) {
+    const uint32_t totalLength = GetCodeSignatureLength(pCSBase, availableSize);
+    if (totalLength == 0) {
+        return false;
+    }
+    CS_SuperBlob superBlob{};
+    std::memcpy(&superBlob, pCSBase, sizeof(superBlob));
+    const uint32_t count = LE(superBlob.count);
+    if (count > kMaximumCodeSignatureBlobCount || count > (totalLength - sizeof(CS_SuperBlob)) / sizeof(CS_BlobIndex)) {
         return false;
     }
 
     Logger::PrintV("\n>>> CodeSignature Segment: \n");
-    Logger::PrintV("\tmagic: \t\t0x%x\n", LE(psb->magic));
-    Logger::PrintV("\tlength: \t%d\n", LE(psb->length));
-    Logger::PrintV("\tslots: \t\t%d\n", LE(psb->count));
+    Logger::PrintV("\tmagic: \t\t0x%x\n", LE(superBlob.magic));
+    Logger::PrintV("\tlength: \t%d\n", LE(superBlob.length));
+    Logger::PrintV("\tslots: \t\t%d\n", count);
 
-    CS_BlobIndex* pbi = (CS_BlobIndex*)(pCSBase + sizeof(CS_SuperBlob));
-    for (uint32_t i = 0; i < LE(psb->count); i++, pbi++) {
-        uint8_t* pSlotBase = pCSBase + LE(pbi->offset);
-        switch (LE(pbi->type)) {
+    const uint32_t indexEnd = static_cast<uint32_t>(sizeof(CS_SuperBlob) + count * sizeof(CS_BlobIndex));
+    vector<std::pair<uint32_t, uint32_t>> slotRanges;
+    slotRanges.reserve(count);
+    for (uint32_t i = 0; i < count; i++) {
+        CS_BlobIndex blobIndex{};
+        std::memcpy(&blobIndex, pCSBase + sizeof(CS_SuperBlob) + i * sizeof(CS_BlobIndex), sizeof(blobIndex));
+        CS_BlobIndex* pbi = &blobIndex;
+        const uint32_t type = LE(blobIndex.type);
+        const uint32_t slotOffset = LE(blobIndex.offset);
+        if (slotOffset < indexEnd || slotOffset > totalLength || totalLength - slotOffset < 8) {
+            return false;
+        }
+        uint8_t* pSlotBase = pCSBase + slotOffset;
+        uint32_t slotLengthBE = 0;
+        std::memcpy(&slotLengthBE, pSlotBase + 4, sizeof(slotLengthBE));
+        const uint32_t slotLength = LE(slotLengthBE);
+        if (slotLength < 8 || slotLength > totalLength - slotOffset) {
+            return false;
+        }
+        slotRanges.emplace_back(slotOffset, slotLength);
+        if (type == CSSLOT_CODEDIRECTORY || type == CSSLOT_ALTERNATE_CODEDIRECTORIES) {
+            if (slotLength < offsetof(CS_CodeDirectory, scatterOffset)) {
+                return false;
+            }
+            CS_CodeDirectory cd{};
+            std::memcpy(&cd, pSlotBase, std::min<std::size_t>(slotLength, sizeof(cd)));
+            const std::size_t requiredHeader = CodeDirectoryHeaderSize(LE(cd.version));
+            if (slotLength < requiredHeader)
+                return false;
+            const uint32_t hashOffset = LE(cd.hashOffset);
+            const uint32_t identOffset = LE(cd.identOffset);
+            const uint32_t teamOffset = LE(cd.teamOffset);
+            const uint64_t codeHashBytes = static_cast<uint64_t>(LE(cd.nCodeSlots)) * cd.hashSize;
+            const uint64_t specialHashBytes = static_cast<uint64_t>(LE(cd.nSpecialSlots)) * cd.hashSize;
+            if (cd.hashSize == 0 || hashOffset < requiredHeader || specialHashBytes > hashOffset - requiredHeader ||
+                hashOffset > slotLength || codeHashBytes > slotLength - hashOffset || identOffset < requiredHeader ||
+                identOffset >= slotLength ||
+                std::memchr(pSlotBase + identOffset, 0, slotLength - identOffset) == nullptr ||
+                (LE(cd.version) >= 0x20200 && teamOffset != 0 &&
+                 (teamOffset < requiredHeader || teamOffset >= slotLength ||
+                  std::memchr(pSlotBase + teamOffset, 0, slotLength - teamOffset) == nullptr))) {
+                return false;
+            }
+        }
+        switch (type) {
         case CSSLOT_CODEDIRECTORY:
             SlotParseCodeDirectory(pSlotBase, pbi);
             break;
@@ -765,48 +871,68 @@ bool CodeSignature::ParseCodeSignature(uint8_t* pCSBase) {
         }
     }
 
+    std::sort(slotRanges.begin(), slotRanges.end());
+    for (size_t index = 1; index < slotRanges.size(); ++index) {
+        if (static_cast<uint64_t>(slotRanges[index - 1].first) + slotRanges[index - 1].second > slotRanges[index].first)
+            return false;
+    }
+
     if (Logger::IsDebug()) {
-        FileSystem::WriteFile("./.orchardseal_debug/CodeSignature.blob", (const char*)pCSBase, LE(psb->length));
+        FileSystem::WriteFile("./.orchardseal_debug/CodeSignature.blob", (const char*)pCSBase, totalLength);
     }
     return true;
 }
 
-bool CodeSignature::SlotGetCodeSlotsData(uint8_t* pSlotBase, uint8_t*& pCodeSlots, uint32_t& uCodeSlotsLength) {
-    uint32_t uSlotLength = LE(*(((uint32_t*)pSlotBase) + 1));
-    if (uSlotLength < 8) {
-        return false;
-    }
-    CS_CodeDirectory cdHeader = *((CS_CodeDirectory*)pSlotBase);
-    pCodeSlots = pSlotBase + LE(cdHeader.hashOffset);
-    uCodeSlotsLength = LE(cdHeader.nCodeSlots) * cdHeader.hashSize;
-    return true;
-}
-
-bool CodeSignature::GetCodeSignatureExistsCodeSlotsData(uint8_t* pCSBase, uint8_t*& pCodeSlots1Data,
-                                                        uint32_t& uCodeSlots1DataLength, uint8_t*& pCodeSlots256Data,
+bool CodeSignature::GetCodeSignatureExistsCodeSlotsData(uint8_t* pCSBase, uint32_t signatureSize,
+                                                        uint8_t*& pCodeSlots1Data, uint32_t& uCodeSlots1DataLength,
+                                                        uint8_t*& pCodeSlots256Data,
                                                         uint32_t& uCodeSlots256DataLength) {
     pCodeSlots1Data = NULL;
     pCodeSlots256Data = NULL;
     uCodeSlots1DataLength = 0;
     uCodeSlots256DataLength = 0;
-    CS_SuperBlob* psb = (CS_SuperBlob*)pCSBase;
-    if (NULL == psb || CSMAGIC_EMBEDDED_SIGNATURE != LE(psb->magic)) {
+    const uint32_t totalLength = GetCodeSignatureLength(pCSBase, signatureSize);
+    if (totalLength == 0) {
         return false;
     }
+    CS_SuperBlob superBlob{};
+    std::memcpy(&superBlob, pCSBase, sizeof(superBlob));
+    const uint32_t count = LE(superBlob.count);
+    if (count > kMaximumCodeSignatureBlobCount || count > (totalLength - sizeof(CS_SuperBlob)) / sizeof(CS_BlobIndex)) {
+        return false;
+    }
+    const uint32_t indexEnd = static_cast<uint32_t>(sizeof(CS_SuperBlob) + count * sizeof(CS_BlobIndex));
 
-    CS_BlobIndex* pbi = (CS_BlobIndex*)(pCSBase + sizeof(CS_SuperBlob));
-    for (uint32_t i = 0; i < LE(psb->count); i++, pbi++) {
-        uint8_t* pSlotBase = pCSBase + LE(pbi->offset);
-        switch (LE(pbi->type)) {
+    for (uint32_t i = 0; i < count; i++) {
+        CS_BlobIndex blobIndex{};
+        std::memcpy(&blobIndex, pCSBase + sizeof(CS_SuperBlob) + i * sizeof(CS_BlobIndex), sizeof(blobIndex));
+        const uint32_t type = LE(blobIndex.type);
+        if (type != CSSLOT_CODEDIRECTORY && type != CSSLOT_ALTERNATE_CODEDIRECTORIES)
+            continue;
+        const uint32_t slotOffset = LE(blobIndex.offset);
+        if (slotOffset < indexEnd || slotOffset > totalLength ||
+            totalLength - slotOffset < offsetof(CS_CodeDirectory, scatterOffset)) {
+            return false;
+        }
+        uint8_t* pSlotBase = pCSBase + slotOffset;
+        CS_CodeDirectory cdHeader{};
+        std::memcpy(&cdHeader, pSlotBase, std::min<std::size_t>(totalLength - slotOffset, sizeof(cdHeader)));
+        const uint32_t slotLength = LE(cdHeader.length);
+        const uint32_t hashOffset = LE(cdHeader.hashOffset);
+        const uint64_t hashBytes = static_cast<uint64_t>(LE(cdHeader.nCodeSlots)) * cdHeader.hashSize;
+        const std::size_t requiredHeader = CodeDirectoryHeaderSize(LE(cdHeader.version));
+        if (slotLength < requiredHeader || slotLength > totalLength - slotOffset || cdHeader.hashSize == 0 ||
+            hashOffset < requiredHeader || hashOffset > slotLength || hashBytes > slotLength - hashOffset) {
+            return false;
+        }
+        switch (type) {
         case CSSLOT_CODEDIRECTORY: {
-            CS_CodeDirectory cdHeader = *((CS_CodeDirectory*)pSlotBase);
             if (LE(cdHeader.length) > 8) {
                 pCodeSlots1Data = pSlotBase + LE(cdHeader.hashOffset);
                 uCodeSlots1DataLength = LE(cdHeader.nCodeSlots) * cdHeader.hashSize;
             }
         } break;
         case CSSLOT_ALTERNATE_CODEDIRECTORIES: {
-            CS_CodeDirectory cdHeader = *((CS_CodeDirectory*)pSlotBase);
             if (LE(cdHeader.length) > 8) {
                 pCodeSlots256Data = pSlotBase + LE(cdHeader.hashOffset);
                 uCodeSlots256DataLength = LE(cdHeader.nCodeSlots) * cdHeader.hashSize;

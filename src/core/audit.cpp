@@ -43,7 +43,7 @@ namespace orchardseal::audit {
 
             ~ScopedDirectory() {
                 if (!path_.empty()) {
-                    FileSystem::RemoveFolder(path_.string().c_str());
+                    FileSystem::RemoveFolder(path_.u8string().c_str());
                 }
             }
 
@@ -61,16 +61,16 @@ namespace orchardseal::audit {
         }
 
         bool HasExtension(const fs::path& path, const char* extension) {
-            return LowerCopy(path.extension().string()) == extension;
+            return LowerCopy(path.extension().u8string()) == extension;
         }
 
         bool IsSignableBundlePath(const fs::path& path) {
-            const std::string extension = LowerCopy(path.extension().string());
+            const std::string extension = LowerCopy(path.extension().u8string());
             return extension == ".app" || extension == ".appex" || extension == ".framework" || extension == ".xctest";
         }
 
         std::string BundleType(const fs::path& path) {
-            const std::string extension = LowerCopy(path.extension().string());
+            const std::string extension = LowerCopy(path.extension().u8string());
             if (extension == ".app") {
                 return "app";
             }
@@ -121,12 +121,12 @@ namespace orchardseal::audit {
             std::error_code error;
             fs::path relative = fs::relative(path, root, error);
             if (!error && !relative.empty() && relative != ".") {
-                return relative.generic_string();
+                return relative.generic_u8string();
             }
             if (path == root && !path.filename().empty()) {
-                return path.filename().generic_string();
+                return path.filename().generic_u8string();
             }
-            return path.generic_string();
+            return path.generic_u8string();
         }
 
         bool IsWithin(const fs::path& child, const fs::path& parent) {
@@ -212,7 +212,7 @@ namespace orchardseal::audit {
                 }
 
                 if (entry.is_directory(error)) {
-                    const std::string name = entry.path().filename().string();
+                    const std::string name = entry.path().filename().u8string();
                     if (name == "__MACOSX" || HasExtension(entry.path(), ".dsym")) {
                         iterator.disable_recursion_pending();
                     } else if (IsSignableBundlePath(entry.path())) {
@@ -228,7 +228,7 @@ namespace orchardseal::audit {
                 if (leftDepth != rightDepth) {
                     return leftDepth < rightDepth;
                 }
-                return left.generic_string() < right.generic_string();
+                return left.generic_u8string() < right.generic_u8string();
             });
             bundles.erase(std::unique(bundles.begin(), bundles.end()), bundles.end());
             return bundles;
@@ -328,11 +328,11 @@ namespace orchardseal::audit {
         bool ParseProfile(const fs::path& path, bool embedded, ProfileRecord& record, std::string& error) {
             record = ProfileRecord{};
             record.absolutePath = path;
-            record.info.path = path.generic_string();
+            record.info.path = path.generic_u8string();
             record.info.embedded = embedded;
 
             std::string data;
-            if (!FileSystem::ReadFile(path.string().c_str(), data)) {
+            if (!FileSystem::ReadFile(path.u8string().c_str(), data)) {
                 error = "Unable to read provisioning profile.";
                 return false;
             }
@@ -435,7 +435,7 @@ namespace orchardseal::audit {
 
             const fs::path infoPath = path / "Info.plist";
             jvalue info;
-            if (!info.read_plist_from_file("%s", infoPath.string().c_str())) {
+            if (!info.read_plist_from_file("%s", infoPath.u8string().c_str())) {
                 AddIssue(report, Severity::Error, "INFO_PLIST_INVALID", "Info.plist is missing or unreadable.",
                          record.info.path);
                 return record;
@@ -464,7 +464,7 @@ namespace orchardseal::audit {
                 AddIssue(report, Severity::Error, "BUNDLE_EXECUTABLE_MISSING", "CFBundleExecutable is missing.",
                          record.info.path);
             } else {
-                record.executablePath = path / executableName;
+                record.executablePath = path / fs::u8path(executableName);
                 record.info.executable = DisplayPath(root, record.executablePath);
                 std::error_code fsError;
                 if (!fs::is_regular_file(record.executablePath, fsError)) {
@@ -524,7 +524,7 @@ namespace orchardseal::audit {
             MachOFile macho;
             const int previousLogLevel = Logger::GetLogLevel();
             Logger::SetLogLevel(Logger::E_NONE);
-            const bool initialized = macho.InitReadOnly(path.string().c_str());
+            const bool initialized = macho.InitReadOnly(path.u8string().c_str());
             Logger::SetLogLevel(previousLogLevel);
             if (!initialized) {
                 AddIssue(report, Severity::Error, "MACHO_INVALID", "Mach-O headers could not be parsed.", displayPath);
@@ -535,7 +535,7 @@ namespace orchardseal::audit {
             binary.path = displayPath;
             binary.ownerBundleId = OwnerBundleId(path, bundles);
             binary.mainExecutable = IsMainExecutable(path, bundles);
-            binary.sizeBytes = FileSystem::GetFileSize(path.string().c_str());
+            binary.sizeBytes = FileSystem::GetFileSize(path.u8string().c_str());
             binary.architectures = macho.GetArchitectureInfo();
             binary.signaturePresent = !binary.architectures.empty() &&
                                       std::all_of(binary.architectures.begin(), binary.architectures.end(),
@@ -604,12 +604,12 @@ namespace orchardseal::audit {
                         continue;
                     }
                     if (entry.is_directory(error)) {
-                        const std::string name = entry.path().filename().string();
+                        const std::string name = entry.path().filename().u8string();
                         if (name == "__MACOSX" || HasExtension(entry.path(), ".dsym")) {
                             iterator.disable_recursion_pending();
                         }
                     } else if (entry.is_regular_file(error) && IsMachOFile(entry.path())) {
-                        const std::string normalized = entry.path().lexically_normal().generic_string();
+                        const std::string normalized = entry.path().lexically_normal().generic_u8string();
                         if (visited.insert(normalized).second) {
                             AuditBinary(root, entry.path(), bundles, true, report);
                         }
@@ -701,14 +701,14 @@ namespace orchardseal::audit {
             std::vector<std::string> profilePaths;
             for (const int index : externalProfiles) {
                 if (index >= 0 && static_cast<std::size_t>(index) < profiles.size()) {
-                    profilePaths.push_back(profiles[static_cast<std::size_t>(index)].absolutePath.string());
+                    profilePaths.push_back(profiles[static_cast<std::size_t>(index)].absolutePath.u8string());
                 }
             }
             if (profilePaths.empty()) {
                 for (const BundleRecord& bundle : bundles) {
                     if (bundle.embeddedProfileIndex >= 0) {
                         const ProfileRecord& profile = profiles[static_cast<std::size_t>(bundle.embeddedProfileIndex)];
-                        profilePaths.push_back(profile.absolutePath.string());
+                        profilePaths.push_back(profile.absolutePath.u8string());
                     }
                 }
             }
@@ -803,7 +803,7 @@ namespace orchardseal::audit {
             return false;
         }
 
-        const fs::path input = fs::path(request.inputPath).lexically_normal();
+        const fs::path input = fs::u8path(request.inputPath).lexically_normal();
         std::error_code fsError;
         if (!fs::exists(input, fsError)) {
             error = "Input path does not exist.";
@@ -816,7 +816,7 @@ namespace orchardseal::audit {
         for (const std::string& profilePath : request.provisioningFiles) {
             ProfileRecord profile;
             std::string profileError;
-            const bool parsed = ParseProfile(fs::path(profilePath), false, profile, profileError);
+            const bool parsed = ParseProfile(fs::u8path(profilePath), false, profile, profileError);
             const int index = static_cast<int>(profiles.size());
             if (!parsed) {
                 profile.parseError = profileError;
@@ -827,11 +827,11 @@ namespace orchardseal::audit {
 
         fs::path auditRoot = input;
         fs::path temporaryDirectory;
-        if (FileSystem::IsZipFile(input.string().c_str())) {
+        if (FileSystem::IsZipFile(input.u8string().c_str())) {
             report.inputType = "ipa-archive";
             temporaryDirectory =
-                fs::path(request.tempDirectory) / ("orchardseal_audit_" + std::to_string(Utility::GetMicroSecond()));
-            if (!ZipArchive::Extract(input.string().c_str(), temporaryDirectory.string().c_str())) {
+                fs::u8path(request.tempDirectory) / ("orchardseal_audit_" + std::to_string(Utility::GetMicroSecond()));
+            if (!ZipArchive::Extract(input.u8string().c_str(), temporaryDirectory.u8string().c_str())) {
                 error = "Archive extraction failed. The archive may be corrupt or contain unsafe paths.";
                 return false;
             }

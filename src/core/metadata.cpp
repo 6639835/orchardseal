@@ -283,25 +283,29 @@ static void GetIconNames(jvalue& jvInfo, vector<string>& arrNames) {
     }
 }
 
-static bool FindLargestIcon(const string& strAppFolder, const vector<string>& arrIconNames, string& strBestPath) {
+static bool FindLargestIcon(const string& strAppFolder, const vector<string>& arrIconNames, string& strBestPath,
+                            bool& traversalSucceeded) {
     int64_t nBestSize = 0;
-    FileSystem::EnumFolder(strAppFolder.c_str(), false, NULL, [&](bool bFolder, const string& strPath) {
-        if (bFolder) {
-            return false;
-        }
-        string strBaseName = Utility::GetBaseName(strPath.c_str());
-        for (const string& strPrefix : arrIconNames) {
-            if (0 == strncmp(strBaseName.c_str(), strPrefix.c_str(), strPrefix.size())) {
-                int64_t nSize = FileSystem::GetFileSize(strPath.c_str());
-                if (nSize > nBestSize) {
-                    nBestSize = nSize;
-                    strBestPath = strPath;
-                }
-                break;
+    traversalSucceeded =
+        FileSystem::EnumFolder(strAppFolder.c_str(), false, NULL, [&](bool bFolder, const string& strPath) {
+            if (bFolder) {
+                return false;
             }
-        }
-        return false;
-    });
+            string strBaseName = Utility::GetBaseName(strPath.c_str());
+            for (const string& strPrefix : arrIconNames) {
+                if (0 == strncmp(strBaseName.c_str(), strPrefix.c_str(), strPrefix.size())) {
+                    int64_t nSize = FileSystem::GetFileSize(strPath.c_str());
+                    if (nSize < 0)
+                        return true;
+                    if (nSize > nBestSize) {
+                        nBestSize = nSize;
+                        strBestPath = strPath;
+                    }
+                    break;
+                }
+            }
+            return false;
+        });
     return (nBestSize > 0);
 }
 
@@ -333,7 +337,13 @@ bool GetMetadata(const string& strAppFolder, const string& strOutputDir, const s
     GetIconNames(jvInfo, arrIconNames);
 
     string strBestIconPath;
-    if (!arrIconNames.empty() && FindLargestIcon(strAppFolder, arrIconNames, strBestIconPath)) {
+    bool iconTraversalSucceeded = true;
+    const bool foundIcon =
+        !arrIconNames.empty() && FindLargestIcon(strAppFolder, arrIconNames, strBestIconPath, iconTraversalSucceeded);
+    if (!iconTraversalSucceeded) {
+        return Logger::ErrorV(">>> Metadata: failed to enumerate app icons in %s\n", strAppFolder.c_str());
+    }
+    if (foundIcon) {
         string strHash;
         Hash::SHA1Text(strBestIconPath, strHash);
         strIconName = strHash + ".png";

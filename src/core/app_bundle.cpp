@@ -163,22 +163,29 @@ bool AppBundle::GetSignFolderInfo(const string& strFolder, jvalue& jvNode, bool 
 bool AppBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo) {
     vector<string> allBundles;
 
-    std::function<void(const string&)> findAllBundles = [&](const string& currentPath) {
-        FileSystem::EnumFolder(currentPath.c_str(), false, NULL, [&](bool bFolder, const string& strPath) {
-            if (bFolder) {
-                if (FileSystem::IsPathSuffix(strPath, ".app") || FileSystem::IsPathSuffix(strPath, ".appex") ||
-                    FileSystem::IsPathSuffix(strPath, ".framework") || FileSystem::IsPathSuffix(strPath, ".xctest")) {
-                    allBundles.push_back(strPath);
-                    findAllBundles(strPath);
-                } else {
-                    findAllBundles(strPath);
+    std::function<bool(const string&)> findAllBundles = [&](const string& currentPath) {
+        bool nestedSucceeded = true;
+        const bool enumerated =
+            FileSystem::EnumFolder(currentPath.c_str(), false, NULL, [&](bool bFolder, const string& strPath) {
+                if (bFolder) {
+                    if (FileSystem::IsPathSuffix(strPath, ".app") || FileSystem::IsPathSuffix(strPath, ".appex") ||
+                        FileSystem::IsPathSuffix(strPath, ".framework") ||
+                        FileSystem::IsPathSuffix(strPath, ".xctest")) {
+                        allBundles.push_back(strPath);
+                        nestedSucceeded = findAllBundles(strPath);
+                    } else {
+                        nestedSucceeded = findAllBundles(strPath);
+                    }
+                    if (!nestedSucceeded)
+                        return true;
                 }
-            }
-            return false;
-        });
+                return false;
+            });
+        return enumerated && nestedSucceeded;
     };
 
-    findAllBundles(strFolder);
+    if (!findAllBundles(strFolder))
+        return false;
 
     sort(allBundles.begin(), allBundles.end(), [](const string& a, const string& b) {
         size_t depthA = count(a.begin(), a.end(), '/');
@@ -189,60 +196,66 @@ bool AppBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo) {
 
     for (const string& bundlePath : allBundles) {
         jvalue jvNode;
-        if (GetSignFolderInfo(bundlePath, jvNode)) {
-            jvInfo["folders"].push_back(jvNode);
-        }
+        if (!GetSignFolderInfo(bundlePath, jvNode))
+            return false;
+        jvInfo["folders"].push_back(jvNode);
     }
 
-    FileSystem::EnumFolder(strFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
-        if (bFolder || string::npos != strPath.find(".dSYM") || string::npos != strPath.find("_WatchKitStub")) {
-            return false;
-        }
-        bool bMachO = false;
-        {
-            FILE* fp = NULL;
-#ifdef _WIN32
-            fopen_s(&fp, strPath.c_str(), "rb");
-#else
-			fp = fopen(strPath.c_str(), "rb");
-#endif
-            if (fp) {
-                uint32_t magic = 0;
-                if (1 == fread(&magic, sizeof(magic), 1, fp)) {
+    bool inspectionFailed = false;
+    if (!FileSystem::EnumFolder(
+            strFolder.c_str(), true, NULL,
+            [&](bool bFolder, const string& strPath) {
+                if (bFolder || string::npos != strPath.find(".dSYM") || string::npos != strPath.find("_WatchKitStub")) {
+                    return false;
+                }
+                bool bMachO = false;
+                const int64_t fileSize = FileSystem::GetFileSize(strPath.c_str());
+                if (fileSize < 0) {
+                    inspectionFailed = true;
+                    return true;
+                }
+                if (fileSize >= static_cast<int64_t>(sizeof(uint32_t))) {
+                    size_t mappedSize = 0;
+                    void* mapped = FileSystem::MapFile(strPath.c_str(), 0, sizeof(uint32_t), &mappedSize, true);
+                    if (mapped == nullptr || mappedSize != sizeof(uint32_t)) {
+                        inspectionFailed = true;
+                        return true;
+                    }
+                    uint32_t magic = 0;
+                    std::memcpy(&magic, mapped, sizeof(magic));
+                    if (!FileSystem::UnmapFile(mapped, mappedSize)) {
+                        inspectionFailed = true;
+                        return true;
+                    }
                     bMachO = (magic == MH_MAGIC || magic == MH_CIGAM || magic == MH_MAGIC_64 || magic == MH_CIGAM_64 ||
                               magic == FAT_MAGIC || magic == FAT_CIGAM);
                 }
-                fclose(fp);
-            }
-        }
-        if (bMachO) {
-            jvInfo["files"].push_back(strPath.substr(appFolder_.size() + 1));
-        }
+                if (bMachO) {
+                    jvInfo["files"].push_back(strPath.substr(appFolder_.size() + 1));
+                }
+                return false;
+            }) ||
+        inspectionFailed)
         return false;
-    });
 
     return true;
 }
 
 bool AppBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes) {
     set<string> setFiles;
-    FileSystem::EnumFolder(strFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
-        if (!bFolder) {
-            string strNode = strPath.substr(strFolder.size() + 1);
-            Utility::StringReplace(strNode, "\\", "/");
-            setFiles.insert(strNode);
-        }
+    if (!FileSystem::EnumFolder(strFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
+            if (!bFolder) {
+                string strNode = strPath.substr(strFolder.size() + 1);
+                Utility::StringReplace(strNode, "\\", "/");
+                setFiles.insert(strNode);
+            }
+            return false;
+        }))
         return false;
-    });
 
     jvalue jvInfo;
     jvInfo.read_plist_from_file("%s/Info.plist", strFolder.c_str());
     string strBundleExe = jvInfo["CFBundleExecutable"];
-
-#ifdef _WIN32
-    WindowsTextConverter converter;
-    strBundleExe = converter.Utf8ToAnsi(strBundleExe);
-#endif
 
     setFiles.erase("_CodeSignature/CodeResources");
     setFiles.erase(strBundleExe);
@@ -254,7 +267,8 @@ bool AppBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes
     for (string strKey : setFiles) {
         if (removeProvision_ && strKey == "embedded.mobileprovision") {
             string strProvFile = strFolder + "/embedded.mobileprovision";
-            remove(strProvFile.c_str());
+            if (!FileSystem::RemoveFile(strProvFile.c_str()))
+                return false;
             Logger::Print(">>> Removed embedded.mobileprovision\n");
             continue;
         }
@@ -262,11 +276,8 @@ bool AppBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes
         string strFile = strFolder + "/" + strKey;
         string strSHA1Base64;
         string strSHA256Base64;
-        Hash::SHABase64File(strFile.c_str(), strSHA1Base64, strSHA256Base64);
-
-#ifdef _WIN32
-        strKey = converter.AnsiToUtf8(strKey);
-#endif
+        if (!Hash::SHABase64File(strFile.c_str(), strSHA1Base64, strSHA256Base64))
+            return false;
 
         bool bomit1 = false;
         bool bomit2 = false;
@@ -445,11 +456,6 @@ bool AppBundle::SignNode(jvalue& jvNode) {
         return false;
     }
 
-#ifdef _WIN32
-    WindowsTextConverter converter;
-    strBundleExe = converter.Utf8ToAnsi(strBundleExe);
-#endif
-
     string strBaseFolder = appFolder_;
     if ("/" != strFolder) {
         strBaseFolder += "/";
@@ -482,7 +488,8 @@ bool AppBundle::SignNode(jvalue& jvNode) {
         }
 
         if (!dylibsToRemove_.empty()) {
-            macho.RemoveDylibs(dylibsToRemove_);
+            if (!macho.RemoveDylibs(dylibsToRemove_))
+                return false;
             for (const string& name : dylibsToRemove_) {
                 string baseName = name;
                 if (StartsWith(baseName, "@executable_path/")) {
@@ -519,7 +526,8 @@ bool AppBundle::SignNode(jvalue& jvNode) {
                         return false;
                     }
                     if (!dylibsToRemove_.empty()) {
-                        fileMachO.RemoveDylibs(dylibsToRemove_);
+                        if (!fileMachO.RemoveDylibs(dylibsToRemove_))
+                            return false;
                     }
                     bFileForceSign = true;
                 }
@@ -613,14 +621,15 @@ bool AppBundle::SignNode(jvalue& jvNode) {
 
 bool AppBundle::ModifyPluginsBundleId(const string& strOldBundleId, const string& strNewBundleId) {
     vector<string> arrFolders;
-    FileSystem::EnumFolder(appFolder_.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
-        if (bFolder) {
-            if (FileSystem::IsPathSuffix(strPath, ".app") || FileSystem::IsPathSuffix(strPath, ".appex")) {
-                arrFolders.push_back(strPath);
+    if (!FileSystem::EnumFolder(appFolder_.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
+            if (bFolder) {
+                if (FileSystem::IsPathSuffix(strPath, ".app") || FileSystem::IsPathSuffix(strPath, ".appex")) {
+                    arrFolders.push_back(strPath);
+                }
             }
-        }
+            return false;
+        }))
         return false;
-    });
 
     for (const string& strFolder : arrFolders) {
         jvalue jvInfo;
@@ -658,7 +667,8 @@ bool AppBundle::ModifyPluginsBundleId(const string& strOldBundleId, const string
             }
         }
 
-        jvInfo.style_write_plist_to_file("%s/Info.plist", strFolder.c_str());
+        if (!jvInfo.style_write_plist_to_file("%s/Info.plist", strFolder.c_str()))
+            return false;
     }
 
     return true;
@@ -676,17 +686,13 @@ bool AppBundle::ModifyBundleInfo(const string& strBundleId, const string& strBun
         string strOldBundleId = jvInfo["CFBundleIdentifier"];
         jvInfo["CFBundleIdentifier"] = strBundleId;
         Logger::PrintV(">>> BundleId: \t%s -> %s\n", strOldBundleId.c_str(), strBundleId.c_str());
-        ModifyPluginsBundleId(strOldBundleId, strBundleId);
+        if (!ModifyPluginsBundleId(strOldBundleId, strBundleId))
+            return false;
     }
 
     if (!strDisplayName.empty()) {
 
         string strNewDisplayName = strDisplayName;
-
-#ifdef _WIN32
-        WindowsTextConverter converter;
-        strNewDisplayName = converter.AnsiToUtf8(strDisplayName);
-#endif
 
         string strOldDisplayName = jvInfo["CFBundleDisplayName"];
         if (strOldDisplayName.empty()) {
@@ -710,11 +716,6 @@ bool AppBundle::ModifyBundleInfo(const string& strBundleId, const string& strBun
             jvInfoStrings.style_write_plist_to_file("%s/zh-Hans.lproj/InfoPlist.strings", appFolder_.c_str());
         }
 
-#ifdef _WIN32
-        strOldDisplayName = converter.Utf8ToAnsi(strOldDisplayName);
-        strNewDisplayName = converter.Utf8ToAnsi(strNewDisplayName);
-#endif
-
         Logger::PrintV(">>> BundleName: %s -> %s\n", strOldDisplayName.c_str(), strNewDisplayName.c_str());
     }
 
@@ -725,8 +726,7 @@ bool AppBundle::ModifyBundleInfo(const string& strBundleId, const string& strBun
         Logger::PrintV(">>> BundleVersion: %s -> %s\n", strOldBundleVersion.c_str(), strBundleVersion.c_str());
     }
 
-    jvInfo.style_write_plist_to_file("%s/Info.plist", appFolder_.c_str());
-    return true;
+    return jvInfo.style_write_plist_to_file("%s/Info.plist", appFolder_.c_str());
 }
 
 bool AppBundle::ReplaceBundleIcons(const string& strIconFile) {
@@ -737,12 +737,13 @@ bool AppBundle::ReplaceBundleIcons(const string& strIconFile) {
 
     vector<string> arrBundleFolders;
     arrBundleFolders.push_back(appFolder_);
-    FileSystem::EnumFolder(appFolder_.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
-        if (bFolder && (FileSystem::IsPathSuffix(strPath, ".app") || FileSystem::IsPathSuffix(strPath, ".appex"))) {
-            arrBundleFolders.push_back(strPath);
-        }
+    if (!FileSystem::EnumFolder(appFolder_.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
+            if (bFolder && (FileSystem::IsPathSuffix(strPath, ".app") || FileSystem::IsPathSuffix(strPath, ".appex"))) {
+                arrBundleFolders.push_back(strPath);
+            }
+            return false;
+        }))
         return false;
-    });
 
     uint32_t uReplaced = 0;
     for (const string& strBundleFolder : arrBundleFolders) {
@@ -757,25 +758,31 @@ bool AppBundle::ReplaceBundleIcons(const string& strIconFile) {
             continue;
         }
 
-        FileSystem::EnumFolder(strBundleFolder.c_str(), false, NULL, [&](bool bFolder, const string& strPath) {
-            if (bFolder) {
-                return false;
-            }
-
-            string strBaseName = Utility::GetBaseName(strPath.c_str());
-            for (const string& strIconName : arrIconNames) {
-                if (IsIconFileMatch(strBaseName, strIconName)) {
-                    if (FileSystem::CopyFile(strIconFile.c_str(), strPath.c_str())) {
-                        uReplaced++;
-                        Logger::PrintV(">>> Replaced icon: %s\n", strPath.c_str());
-                    } else {
-                        Logger::WarnV(">>> Failed to replace icon: %s\n", strPath.c_str());
-                    }
-                    break;
+        bool replacementFailed = false;
+        const bool enumerated =
+            FileSystem::EnumFolder(strBundleFolder.c_str(), false, NULL, [&](bool bFolder, const string& strPath) {
+                if (bFolder) {
+                    return false;
                 }
-            }
+
+                string strBaseName = Utility::GetBaseName(strPath.c_str());
+                for (const string& strIconName : arrIconNames) {
+                    if (IsIconFileMatch(strBaseName, strIconName)) {
+                        if (FileSystem::CopyFile(strIconFile.c_str(), strPath.c_str())) {
+                            uReplaced++;
+                            Logger::PrintV(">>> Replaced icon: %s\n", strPath.c_str());
+                        } else {
+                            Logger::ErrorV(">>> Failed to replace icon: %s\n", strPath.c_str());
+                            replacementFailed = true;
+                            return true;
+                        }
+                        break;
+                    }
+                }
+                return false;
+            });
+        if (!enumerated || replacementFailed)
             return false;
-        });
     }
 
     if (0 == uReplaced) {
@@ -927,11 +934,6 @@ bool AppBundle::SignFolder(SigningAsset* pSignAsset, const string& strFolder, co
     }
 
     string strAppName = jvRoot["name"];
-
-#ifdef _WIN32
-    WindowsTextConverter converter;
-    strAppName = converter.Utf8ToAnsi(strAppName);
-#endif
 
     Logger::PrintV(">>> Signing: \t%s ...\n", appFolder_.c_str());
     Logger::PrintV(">>> AppName: \t%s\n", strAppName.c_str());

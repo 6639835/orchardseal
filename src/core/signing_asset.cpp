@@ -7,7 +7,132 @@
 #include <openssl/provider.h>
 #include <openssl/pkcs12.h>
 #include <openssl/conf.h>
+#include <openssl/x509v3.h>
+#include <cstring>
+#include <ctime>
+#include <limits>
 #include <utility>
+
+namespace {
+    template <typename F> class ScopeExit final {
+      public:
+        explicit ScopeExit(F cleanup) : cleanup_(std::move(cleanup)) {}
+        ~ScopeExit() {
+            cleanup_();
+        }
+        ScopeExit(const ScopeExit&) = delete;
+        ScopeExit& operator=(const ScopeExit&) = delete;
+
+      private:
+        F cleanup_;
+    };
+    template <typename F> ScopeExit<F> MakeScopeExit(F cleanup) {
+        return ScopeExit<F>(std::move(cleanup));
+    }
+
+    bool AddTrustedPEM(X509_STORE* store, const char* pem) {
+        BIO* bio = BIO_new_mem_buf(pem, static_cast<int>(std::strlen(pem)));
+        if (bio == nullptr)
+            return false;
+        X509* certificate = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        BIO_free(bio);
+        if (certificate == nullptr)
+            return false;
+        const int added = X509_STORE_add_cert(store, certificate);
+        X509_free(certificate);
+        return added == 1;
+    }
+
+    bool ProvisionedStringMatches(const std::string& allowed, const std::string& requested) {
+        if (!allowed.empty() && allowed.back() == '*') {
+            return requested.compare(0, allowed.size() - 1, allowed, 0, allowed.size() - 1) == 0;
+        }
+        return allowed == requested;
+    }
+
+    bool EntitlementValueAllowed(const jvalue& allowed, const jvalue& requested) {
+        if (allowed.type() != requested.type())
+            return false;
+        if (requested.is_bool())
+            return !requested.as_bool() || allowed.as_bool();
+        if (requested.is_int())
+            return allowed.as_int64() == requested.as_int64();
+        if (requested.is_string())
+            return ProvisionedStringMatches(allowed.as_string(), requested.as_string());
+        if (requested.is_data())
+            return allowed.as_data() == requested.as_data();
+        if (requested.is_array()) {
+            for (size_t requestedIndex = 0; requestedIndex < requested.size(); ++requestedIndex) {
+                bool found = false;
+                for (size_t allowedIndex = 0; allowedIndex < allowed.size(); ++allowedIndex) {
+                    if (EntitlementValueAllowed(allowed[allowedIndex], requested[requestedIndex])) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return false;
+            }
+            return true;
+        }
+        if (requested.is_object()) {
+            vector<string> keys;
+            requested.get_keys(keys);
+            for (const string& key : keys) {
+                if (!allowed.has(key) || !EntitlementValueAllowed(allowed[key], requested[key]))
+                    return false;
+            }
+            return true;
+        }
+        return requested.is_null() && allowed.is_null();
+    }
+
+    bool CertificateIsProvisioned(X509* certificate, const jvalue& profile) {
+        const jvalue& certificates = profile["DeveloperCertificates"];
+        for (size_t index = 0; index < certificates.size(); ++index) {
+            const string encoded = certificates[index].as_data();
+            const unsigned char* cursor = reinterpret_cast<const unsigned char*>(encoded.data());
+            X509* profileCertificate = d2i_X509(nullptr, &cursor, static_cast<long>(encoded.size()));
+            if (profileCertificate != nullptr) {
+                const bool matches = X509_cmp(certificate, profileCertificate) == 0;
+                X509_free(profileCertificate);
+                if (matches)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    string CertificateOrganizationalUnit(X509* certificate) {
+        X509_NAME* subject = X509_get_subject_name(certificate);
+        const int index = X509_NAME_get_index_by_NID(subject, NID_organizationalUnitName, -1);
+        if (index < 0)
+            return {};
+        ASN1_STRING* value = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(subject, index));
+        unsigned char* utf8 = nullptr;
+        const int length = ASN1_STRING_to_UTF8(&utf8, value);
+        if (length < 0)
+            return {};
+        string result(reinterpret_cast<char*>(utf8), static_cast<size_t>(length));
+        OPENSSL_free(utf8);
+        return result;
+    }
+
+    string CertificateNameField(X509* certificate, int nid) {
+        X509_NAME* subject = X509_get_subject_name(certificate);
+        const int index = X509_NAME_get_index_by_NID(subject, nid, -1);
+        if (index < 0)
+            return {};
+        ASN1_STRING* value = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(subject, index));
+        unsigned char* utf8 = nullptr;
+        const int length = ASN1_STRING_to_UTF8(&utf8, value);
+        if (length < 0)
+            return {};
+        string result(reinterpret_cast<char*>(utf8), static_cast<size_t>(length));
+        OPENSSL_free(utf8);
+        return result;
+    }
+} // namespace
 
 const char* SigningAsset::s_szAppleDevCACert = ""
                                                "-----BEGIN CERTIFICATE-----\n"
@@ -274,7 +399,19 @@ SigningAsset::OpenSSLInit::OpenSSLInit() {
 SigningAsset::OpenSSLInit SigningAsset::s_OpenSSLInit;
 
 bool SigningAsset::CMSError() {
-    ERR_print_errors_fp(stdout);
+    BIO* errors = BIO_new(BIO_s_mem());
+    if (errors != nullptr) {
+        ERR_print_errors(errors);
+        char* data = nullptr;
+        const long length = BIO_get_mem_data(errors, &data);
+        if (data != nullptr && length > 0) {
+            const string message(data, static_cast<size_t>(length));
+            Logger::Diagnostic(message.c_str());
+        }
+        BIO_free(errors);
+    } else {
+        ERR_clear_error();
+    }
     return false;
 }
 
@@ -372,6 +509,24 @@ bool SigningAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHa
     EVP_PKEY* spkey = (EVP_PKEY*)pspkey;
 
     STACK_OF(X509)* otherCerts = sk_X509_new_null();
+    BIO* in = nullptr;
+    CMS_ContentInfo* cms = nullptr;
+    ASN1_OBJECT* obj = nullptr;
+    ASN1_OBJECT* obj2 = nullptr;
+    X509_ATTRIBUTE* attr = nullptr;
+    ASN1_TYPE* type_256 = nullptr;
+    BIO* out = nullptr;
+    auto cleanup = MakeScopeExit([&] {
+        BIO_free(out);
+        ASN1_TYPE_free(type_256);
+        X509_ATTRIBUTE_free(attr);
+        ASN1_OBJECT_free(obj2);
+        ASN1_OBJECT_free(obj);
+        CMS_ContentInfo_free(cms);
+        BIO_free(in);
+        if (otherCerts != nullptr)
+            sk_X509_pop_free(otherCerts, X509_free);
+    });
     if (!otherCerts) {
         return CMSError();
     }
@@ -438,13 +593,16 @@ bool SigningAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHa
         }
     }
 
-    BIO* in = BIO_new_mem_buf(strCDHashData.c_str(), (int)strCDHashData.size());
+    if (strCDHashData.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        strCDHashesPlist.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        return false;
+    in = BIO_new_mem_buf(strCDHashData.c_str(), static_cast<int>(strCDHashData.size()));
     if (!in) {
         return CMSError();
     }
 
     int nFlags = CMS_PARTIAL | CMS_DETACHED | CMS_NOSMIMECAP | CMS_BINARY;
-    CMS_ContentInfo* cms = CMS_sign(NULL, NULL, otherCerts, NULL, nFlags);
+    cms = CMS_sign(NULL, NULL, otherCerts, NULL, nFlags);
     if (!cms) {
         return CMSError();
     }
@@ -456,7 +614,7 @@ bool SigningAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHa
     }
 
     // add plist
-    ASN1_OBJECT* obj = OBJ_txt2obj("1.2.840.113635.100.9.1", 1);
+    obj = OBJ_txt2obj("1.2.840.113635.100.9.1", 1);
     if (!obj) {
         return CMSError();
     }
@@ -478,17 +636,20 @@ bool SigningAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHa
         sha256 += hex_upper[c & 0x0F];
     }
 
-    ASN1_OBJECT* obj2 = OBJ_txt2obj("1.2.840.113635.100.9.2", 1);
+    obj2 = OBJ_txt2obj("1.2.840.113635.100.9.2", 1);
     if (!obj2) {
         return CMSError();
     }
 
-    X509_ATTRIBUTE* attr = X509_ATTRIBUTE_new();
-    X509_ATTRIBUTE_set1_object(attr, obj2);
+    attr = X509_ATTRIBUTE_new();
+    if (attr == nullptr || X509_ATTRIBUTE_set1_object(attr, obj2) != 1)
+        return CMSError();
 
-    ASN1_TYPE* type_256 = (ASN1_TYPE*)GenerateASN1Type(sha256);
-    X509_ATTRIBUTE_set1_data(attr, V_ASN1_SEQUENCE, ASN1_STRING_get0_data(type_256->value.asn1_string),
-                             ASN1_STRING_length(type_256->value.asn1_string));
+    type_256 = (ASN1_TYPE*)GenerateASN1Type(sha256);
+    if (type_256 == nullptr || type_256->type != V_ASN1_SEQUENCE || type_256->value.asn1_string == nullptr ||
+        X509_ATTRIBUTE_set1_data(attr, V_ASN1_SEQUENCE, ASN1_STRING_get0_data(type_256->value.asn1_string),
+                                 ASN1_STRING_length(type_256->value.asn1_string)) != 1)
+        return CMSError();
     int addHashSHA = CMS_signed_add1_attr(si, attr);
     if (!addHashSHA) {
         return CMSError();
@@ -498,7 +659,7 @@ bool SigningAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHa
         return CMSError();
     }
 
-    BIO* out = BIO_new(BIO_s_mem());
+    out = BIO_new(BIO_s_mem());
     if (!out) {
         return CMSError();
     }
@@ -516,8 +677,6 @@ bool SigningAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHa
 
     strCMSOutput.clear();
     strCMSOutput.append(bptr->data, bptr->length);
-    ASN1_TYPE_free(type_256);
-    sk_X509_pop_free(otherCerts, X509_free); // CMS_sign holds its own references
     return (!strCMSOutput.empty());
 }
 
@@ -526,25 +685,47 @@ bool SigningAsset::GetCMSContent(const string& strCMSDataInput, string& strConte
         return false;
     }
 
-    BIO* in = BIO_new(BIO_s_mem());
-    OPENSSL_assert((size_t)BIO_write(in, strCMSDataInput.data(), (int)strCMSDataInput.size()) ==
-                   strCMSDataInput.size());
+    if (strCMSDataInput.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    BIO* in = BIO_new_mem_buf(strCMSDataInput.data(), static_cast<int>(strCMSDataInput.size()));
+    if (in == nullptr)
+        return CMSError();
     CMS_ContentInfo* cms = d2i_CMS_bio(in, NULL);
+    BIO_free(in);
     if (!cms) {
         return CMSError();
     }
-
-    ASN1_OCTET_STRING** pos = CMS_get0_content(cms);
-    if (!pos) {
-        return CMSError();
+    X509_STORE* store = X509_STORE_new();
+    BIO* output = BIO_new(BIO_s_mem());
+    auto cleanup = MakeScopeExit([&] {
+        BIO_free(output);
+        X509_STORE_free(store);
+        CMS_ContentInfo_free(cms);
+    });
+    if (store == nullptr || output == nullptr || X509_STORE_set_purpose(store, X509_PURPOSE_ANY) != 1 ||
+        !AddTrustedPEM(store, s_szAppleRootCACert) || !AddTrustedPEM(store, s_szAppleRootCACertG3) ||
+        CMS_verify(cms, nullptr, store, nullptr, output, CMS_BINARY) != 1) {
+        Logger::Error(">>> Provisioning profile CMS signature or Apple trust chain is invalid.\n");
+        return false;
     }
-
-    if (!(*pos)) {
-        return CMSError();
+    STACK_OF(X509)* signers = CMS_get0_signers(cms);
+    const bool expectedAppleSigner =
+        signers != nullptr && sk_X509_num(signers) == 1 &&
+        CertificateNameField(sk_X509_value(signers, 0), NID_organizationName) == "Apple Inc.";
+    const string signerName =
+        expectedAppleSigner ? CertificateNameField(sk_X509_value(signers, 0), NID_commonName) : string();
+    sk_X509_free(signers);
+    if (!expectedAppleSigner || (signerName.find("Provisioning Profile Signing") == string::npos &&
+                                 signerName.find("Application Signing") == string::npos)) {
+        Logger::Error(">>> CMS signer is not an Apple provisioning-profile signer.\n");
+        return false;
     }
-
-    strContentOutput.clear();
-    strContentOutput.append((const char*)ASN1_STRING_get0_data(*pos), ASN1_STRING_length(*pos));
+    BUF_MEM* content = nullptr;
+    BIO_get_mem_ptr(output, &content);
+    if (content == nullptr || content->length == 0)
+        return false;
+    strContentOutput.assign(content->data, content->length);
     return (!strContentOutput.empty());
 }
 
@@ -588,11 +769,13 @@ bool SigningAsset::GetCertSubjectCN(const string& strCertData, string& strSubjec
     }
 
     X509* cert = PEM_read_bio_X509(bcert, NULL, 0, NULL);
+    BIO_free(bcert);
     if (!cert) {
         return CMSError();
     }
-
-    return GetCertSubjectCN(cert, strSubjectCN);
+    const bool result = GetCertSubjectCN(cert, strSubjectCN);
+    X509_free(cert);
+    return result;
 }
 
 void SigningAsset::ParseCertSubject(const string& strSubject, jvalue& jvSubject) {
@@ -618,11 +801,13 @@ string SigningAsset::ASN1_TIMEtoString(const void* time) {
     BUF_MEM* bptr = NULL;
     BIO_get_mem_ptr(out, &bptr);
     if (!bptr) {
+        BIO_free(out);
         CMSError();
         return "";
     }
     string strTime;
     strTime.append(bptr->data, bptr->length);
+    BIO_free(out);
     return strTime;
 }
 
@@ -639,15 +824,23 @@ bool SigningAsset::GetCertInfo(void* pcert, jvalue& jvCertInfo) {
     if (asn1_i) {
         BIGNUM* bignum = ASN1_INTEGER_to_BN(asn1_i, NULL);
         if (bignum) {
-            jvCertInfo["SerialNumber"] = BN_bn2hex(bignum);
+            char* serial = BN_bn2hex(bignum);
+            if (serial != nullptr) {
+                jvCertInfo["SerialNumber"] = serial;
+                OPENSSL_free(serial);
+            }
+            BN_free(bignum);
         }
     }
 
     jvCertInfo["SignatureAlgorithm"] = OBJ_nid2ln(X509_get_signature_nid(cert));
 
     EVP_PKEY* pubkey = X509_get_pubkey(cert);
+    if (pubkey == nullptr)
+        return false;
     int type = EVP_PKEY_id(pubkey);
     jvCertInfo["PublicKey"]["Algorithm"] = OBJ_nid2ln(type);
+    EVP_PKEY_free(pubkey);
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
     jvCertInfo["Validity"]["NotBefore"] = ASN1_TIMEtoString(X509_get_notBefore(cert));
@@ -657,8 +850,12 @@ bool SigningAsset::GetCertInfo(void* pcert, jvalue& jvCertInfo) {
     jvCertInfo["Validity"]["NotAfter"] = ASN1_TIMEtoString(X509_get0_notAfter(cert));
 #endif
 
-    string strIssuer = X509_NAME_oneline(X509_get_issuer_name(cert), NULL, 0);
-    string strSubject = X509_NAME_oneline(X509_get_subject_name(cert), NULL, 0);
+    char* issuerText = X509_NAME_oneline(X509_get_issuer_name(cert), NULL, 0);
+    char* subjectText = X509_NAME_oneline(X509_get_subject_name(cert), NULL, 0);
+    string strIssuer = issuerText == nullptr ? string() : string(issuerText);
+    string strSubject = subjectText == nullptr ? string() : string(subjectText);
+    OPENSSL_free(issuerText);
+    OPENSSL_free(subjectText);
 
     ParseCertSubject(strIssuer, jvCertInfo["Issuer"]);
     ParseCertSubject(strSubject, jvCertInfo["Subject"]);
@@ -667,9 +864,16 @@ bool SigningAsset::GetCertInfo(void* pcert, jvalue& jvCertInfo) {
 }
 
 bool SigningAsset::GetCMSInfo(uint8_t* pCMSData, uint32_t uCMSLength, jvalue& jvOutput) {
+    if (pCMSData == nullptr || uCMSLength == 0 || uCMSLength > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
     BIO* in = BIO_new(BIO_s_mem());
-    OPENSSL_assert((size_t)BIO_write(in, pCMSData, uCMSLength) == uCMSLength);
+    if (in == nullptr || BIO_write(in, pCMSData, static_cast<int>(uCMSLength)) != static_cast<int>(uCMSLength)) {
+        BIO_free(in);
+        return CMSError();
+    }
     CMS_ContentInfo* cms = d2i_CMS_bio(in, NULL);
+    BIO_free(in);
     if (!cms) {
         return CMSError();
     }
@@ -690,6 +894,11 @@ bool SigningAsset::GetCMSInfo(uint8_t* pCMSData, uint32_t uCMSLength, jvalue& jv
     }
 
     STACK_OF(X509)* certs = CMS_get1_certs(cms);
+    auto cleanup = MakeScopeExit([&] {
+        if (certs != nullptr)
+            sk_X509_pop_free(certs, X509_free);
+        CMS_ContentInfo_free(cms);
+    });
     for (int i = 0; i < sk_X509_num(certs); i++) {
         jvalue jvCertInfo;
         if (GetCertInfo(sk_X509_value(certs, i), jvCertInfo)) {
@@ -943,6 +1152,7 @@ bool SigningAsset::Init(const string& strCertFile, const string& strPKeyFile, co
 
     if (NULL == evpPKey) {
         Logger::Error(">>> Can't load p12 or private key file. Please input the correct file and password!\n");
+        X509_free(x509Cert);
         return false;
     }
 
@@ -985,11 +1195,59 @@ bool SigningAsset::Init(const string& strCertFile, const string& strPKeyFile, co
 
     if (NULL == x509Cert) {
         Logger::Error(">>> Can't find paired certificate and private key!\n");
+        EVP_PKEY_free(evpPKey);
+        return false;
+    }
+
+    const time_t now = std::time(nullptr);
+    if ((jvProv["CreationDate"].is_date() && jvProv["CreationDate"].as_date() > now) ||
+        !jvProv["ExpirationDate"].is_date() || jvProv["ExpirationDate"].as_date() <= now) {
+        Logger::Error(">>> Provisioning profile is not currently valid.\n");
+        X509_free(x509Cert);
+        EVP_PKEY_free(evpPKey);
+        return false;
+    }
+    if (X509_cmp_current_time(X509_get0_notBefore(x509Cert)) > 0 ||
+        X509_cmp_current_time(X509_get0_notAfter(x509Cert)) < 0) {
+        Logger::Error(">>> Signing certificate is not currently valid.\n");
+        X509_free(x509Cert);
+        EVP_PKEY_free(evpPKey);
+        return false;
+    }
+    if (!CertificateIsProvisioned(x509Cert, jvProv)) {
+        Logger::Error(">>> Signing certificate is not authorized by the provisioning profile.\n");
+        X509_free(x509Cert);
+        EVP_PKEY_free(evpPKey);
+        return false;
+    }
+    const string certificateTeam = CertificateOrganizationalUnit(x509Cert);
+    string applicationPrefix = jvProv["ApplicationIdentifierPrefix"][0].as_cstr();
+    if (applicationPrefix.empty()) {
+        const size_t separator = applicationIdentifier_.find('.');
+        if (separator != string::npos)
+            applicationPrefix = applicationIdentifier_.substr(0, separator);
+    }
+    const string applicationPrefixWithSeparator = applicationPrefix + ".";
+    if (certificateTeam.empty() || certificateTeam != teamId_ || applicationPrefix.empty() ||
+        applicationIdentifier_.compare(0, applicationPrefixWithSeparator.size(), applicationPrefixWithSeparator) != 0) {
+        Logger::Error(">>> Certificate, profile team, and application identifier are incompatible.\n");
+        X509_free(x509Cert);
+        EVP_PKEY_free(evpPKey);
+        return false;
+    }
+    jvalue requestedEntitlements;
+    if (!entitlementsData_.empty() && (!requestedEntitlements.read_plist(entitlementsData_) ||
+                                       !EntitlementValueAllowed(jvProv["Entitlements"], requestedEntitlements))) {
+        Logger::Error(">>> Requested entitlements exceed the provisioning profile authorization.\n");
+        X509_free(x509Cert);
+        EVP_PKEY_free(evpPKey);
         return false;
     }
 
     if (!GetCertSubjectCN(x509Cert, subjectCommonName_)) {
         Logger::Error(">>> Can't find paired certificate subject common name!\n");
+        X509_free(x509Cert);
+        EVP_PKEY_free(evpPKey);
         return false;
     }
 

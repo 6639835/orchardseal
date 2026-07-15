@@ -33,7 +33,7 @@ class MachOSlice final {
     [[nodiscard]] bool IsSigned() const;
     [[nodiscard]] MachOSliceInfo GetInfo() const;
     [[nodiscard]] bool InjectDylib(bool weakInject, const char* dylibFile);
-    void RemoveDylibs(const std::set<std::string>& dylibs);
+    [[nodiscard]] bool RemoveDylibs(const std::set<std::string>& dylibs);
     [[nodiscard]] std::uint32_t ReallocCodeSignSpace(const std::string& newFile);
 
     [[nodiscard]] const std::string& InfoPlist() const noexcept {
@@ -67,6 +67,7 @@ class MachOSlice final {
     std::uint32_t codeLength_ = 0;
     std::uint8_t* signatureBase_ = nullptr;
     std::uint32_t signatureLength_ = 0;
+    std::uint32_t signatureCapacity_ = 0;
     std::string infoPlist_;
     bool encrypted_ = false;
     bool is64Bit_ = false;
