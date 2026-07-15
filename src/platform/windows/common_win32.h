@@ -36,17 +36,6 @@
         fopen_s(&fp, path, mode);                                                                                      \
     }
 
-#ifdef _M_ARM64
-#pragma comment(lib, "../lib/openssl/arm64/mt/libssl.lib")
-#pragma comment(lib, "../lib/openssl/arm64/mt/libcrypto.lib")
-#elif defined(_M_X64)
-#pragma comment(lib, "../lib/openssl/x64/mt/libssl.lib")
-#pragma comment(lib, "../lib/openssl/x64/mt/libcrypto.lib")
-#else
-#pragma comment(lib, "../lib/openssl/x86/mt/libssl.lib")
-#pragma comment(lib, "../lib/openssl/x86/mt/libcrypto.lib")
-#endif
-
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "crypt32.lib")

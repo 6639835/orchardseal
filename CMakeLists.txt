@@ -137,7 +137,9 @@ target_include_directories(orchardseal_core
         "${CMAKE_CURRENT_BINARY_DIR}/generated/include"
 )
 if(WIN32)
-    target_include_directories(orchardseal_core PRIVATE src/platform/windows)
+    # Public headers include the Win32 compatibility declarations, so consumers
+    # such as unit-test targets need this path as part of the usage contract.
+    target_include_directories(orchardseal_core PUBLIC src/platform/windows)
 endif()
 target_link_libraries(orchardseal_core
     PUBLIC
