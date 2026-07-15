@@ -6,6 +6,14 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.3.2]
+
+### Fixed
+
+- Propagated Win32 compatibility headers to targets consuming the core library.
+- Removed obsolete repository-relative OpenSSL linker pragmas so Windows builds
+  consistently use the dependency targets selected by CMake.
+
 ## [0.3.1]
 
 ### Fixed
