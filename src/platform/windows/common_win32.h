@@ -1,15 +1,23 @@
 #pragma once
 
 #ifndef WINVER
-#define WINVER 0x0501
+#define WINVER 0x0602
 #endif
 
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0501
+#define _WIN32_WINNT 0x0602
 #endif
 
 #ifndef _WIN32_WINDOWS
 #define _WIN32_WINDOWS 0x0410
+#endif
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+
+#ifndef _UNICODE
+#define _UNICODE
 #endif
 
 #define WIN32_LEAN_AND_MEAN

@@ -1,5 +1,6 @@
 #include "json.h"
 #include "base64.h"
+#include "file_system.h"
 #include <time.h>
 #include <math.h>
 #include <assert.h>
@@ -8,6 +9,120 @@
 #include <stdlib.h>
 #include <limits>
 using namespace std;
+
+namespace {
+
+    bool ParseUtcDate(const string& text, time_t& result) {
+        if (text.size() != 20 || text[4] != '-' || text[7] != '-' || text[10] != 'T' || text[13] != ':' ||
+            text[16] != ':' || text[19] != 'Z') {
+            return false;
+        }
+        const auto digits = [&](size_t offset, size_t count, int& value) {
+            value = 0;
+            for (size_t i = 0; i < count; ++i) {
+                const char character = text[offset + i];
+                if (character < '0' || character > '9') {
+                    return false;
+                }
+                value = value * 10 + character - '0';
+            }
+            return true;
+        };
+        int year, month, day, hour, minute, second;
+        if (!digits(0, 4, year) || !digits(5, 2, month) || !digits(8, 2, day) || !digits(11, 2, hour) ||
+            !digits(14, 2, minute) || !digits(17, 2, second) || year < 1 || month < 1 || month > 12 || hour > 23 ||
+            minute > 59 || second > 59) {
+            return false;
+        }
+        const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        static const int daysPerMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        const int maximumDay = daysPerMonth[month - 1] + (month == 2 && leap ? 1 : 0);
+        if (day < 1 || day > maximumDay) {
+            return false;
+        }
+
+        // Howard Hinnant's civil-date conversion, producing days relative to 1970-01-01.
+        int adjustedYear = year - (month <= 2 ? 1 : 0);
+        const int era = (adjustedYear >= 0 ? adjustedYear : adjustedYear - 399) / 400;
+        const unsigned yearOfEra = static_cast<unsigned>(adjustedYear - era * 400);
+        const unsigned adjustedMonth = static_cast<unsigned>(month + (month > 2 ? -3 : 9));
+        const unsigned dayOfYear = (153U * adjustedMonth + 2U) / 5U + static_cast<unsigned>(day - 1);
+        const unsigned dayOfEra = yearOfEra * 365U + yearOfEra / 4U - yearOfEra / 100U + dayOfYear;
+        const int64_t days = static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(dayOfEra) - 719468;
+        const int64_t seconds = days * INT64_C(86400) + hour * INT64_C(3600) + minute * INT64_C(60) + second;
+        const time_t converted = static_cast<time_t>(seconds);
+        if (static_cast<int64_t>(converted) != seconds) {
+            return false;
+        }
+        result = converted;
+        return true;
+    }
+
+    bool IsStrictJsonNumber(const char* begin, const char* end) {
+        const char* cursor = begin;
+        if (cursor != end && *cursor == '-') {
+            ++cursor;
+        }
+        if (cursor == end) {
+            return false;
+        }
+        if (*cursor == '0') {
+            ++cursor;
+            if (cursor != end && *cursor >= '0' && *cursor <= '9') {
+                return false;
+            }
+        } else if (*cursor >= '1' && *cursor <= '9') {
+            while (cursor != end && *cursor >= '0' && *cursor <= '9') {
+                ++cursor;
+            }
+        } else {
+            return false;
+        }
+        if (cursor != end && *cursor == '.') {
+            ++cursor;
+            const char* fraction = cursor;
+            while (cursor != end && *cursor >= '0' && *cursor <= '9') {
+                ++cursor;
+            }
+            if (cursor == fraction) {
+                return false;
+            }
+        }
+        if (cursor != end && (*cursor == 'e' || *cursor == 'E')) {
+            ++cursor;
+            if (cursor != end && (*cursor == '+' || *cursor == '-')) {
+                ++cursor;
+            }
+            const char* exponent = cursor;
+            while (cursor != end && *cursor >= '0' && *cursor <= '9') {
+                ++cursor;
+            }
+            if (cursor == exponent) {
+                return false;
+            }
+        }
+        return cursor == end;
+    }
+
+    void AppendUtf8(string& output, uint32_t codepoint) {
+        if (codepoint <= 0x7F) {
+            output.push_back(static_cast<char>(codepoint));
+        } else if (codepoint <= 0x7FF) {
+            output.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+            output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        } else if (codepoint <= 0xFFFF) {
+            output.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+            output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+            output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        } else {
+            output.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+            output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+            output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+            output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        }
+    }
+
+} // namespace
 
 #ifdef _WIN32
 
@@ -763,12 +878,8 @@ time_t jvalue::as_date() const {
         break;
     case E_STRING: {
         if (is_date_string()) {
-            tm ft = {0};
-            sscanf_s(m_value.p_string + 5, "%04d-%02d-%02dT%02d:%02d:%02dZ", &ft.tm_year, &ft.tm_mon, &ft.tm_mday,
-                     &ft.tm_hour, &ft.tm_min, &ft.tm_sec);
-            ft.tm_mon -= 1;
-            ft.tm_year -= 1900;
-            return mktime(&ft);
+            time_t value = 0;
+            return ParseUtcDate(m_value.p_string + 5, value) ? value : 0;
         }
     } break;
     case E_NULL:
@@ -896,36 +1007,100 @@ bool jvalue::read_plist(const char* pdoc, size_t len /*= 0*/, string* pstrerr /*
 }
 
 bool jvalue::_read_data_from_file(const char* path, string& data) {
+    static const size_t MAX_READ = static_cast<size_t>(256) * 1024U * 1024U;
+    static const size_t BUFFER_SIZE = 64U * 1024U;
     data.clear();
-    FILE* fp = NULL;
-    _fopen64(fp, path, "rb");
-    if (NULL == fp) {
+    if (path == nullptr || *path == '\0') {
         return false;
     }
-    _fseeki64(fp, 0, SEEK_END);
-    int64_t to_read = _ftelli64(fp);
-    _fseeki64(fp, 0, SEEK_SET);
-    if (to_read <= 0) {
-        fclose(fp);
+
+#ifdef _WIN32
+    const int pathLength = static_cast<int>(strlen(path));
+    const int wideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, pathLength, nullptr, 0);
+    if (wideLength <= 0) {
         return false;
     }
-    // Cap at 256 MB - plist/JSON files processed by orchardseal are always far smaller.
-    static const int64_t MAX_READ = (int64_t)256 * 1024 * 1024;
-    if (to_read > MAX_READ) {
-        fclose(fp);
+    std::wstring widePath(static_cast<size_t>(wideLength), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, pathLength, widePath.data(), wideLength) !=
+        wideLength) {
         return false;
     }
-    data.resize((size_t)to_read);
-    int64_t readed = 0;
-    while (readed < to_read) {
-        size_t ret = fread(&(data[readed]), 1, (size_t)(to_read - readed), fp);
-        if (ret == 0) {
+
+    HANDLE input = CreateFileW(widePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    BY_HANDLE_FILE_INFORMATION information{};
+    LARGE_INTEGER initialSize{};
+    if (input == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(input, &information) ||
+        (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        !GetFileSizeEx(input, &initialSize) || initialSize.QuadPart <= 0 ||
+        static_cast<unsigned long long>(initialSize.QuadPart) > MAX_READ) {
+        if (input != INVALID_HANDLE_VALUE) {
+            CloseHandle(input);
+        }
+        return false;
+    }
+    data.reserve(static_cast<size_t>(initialSize.QuadPart));
+#else
+    const int input = open(path, O_RDONLY
+#ifdef O_NOFOLLOW
+                                     | O_NOFOLLOW
+#endif
+    );
+    struct stat information{};
+    if (input < 0 || fstat(input, &information) != 0 || !S_ISREG(information.st_mode) || information.st_size <= 0 ||
+        static_cast<uint64_t>(information.st_size) > MAX_READ) {
+        if (input >= 0) {
+            close(input);
+        }
+        return false;
+    }
+    data.reserve(static_cast<size_t>(information.st_size));
+#endif
+
+    bool success = true;
+    char buffer[BUFFER_SIZE];
+    while (true) {
+#ifdef _WIN32
+        DWORD count = 0;
+        if (!ReadFile(input, buffer, static_cast<DWORD>(sizeof(buffer)), &count, nullptr)) {
+            success = false;
             break;
         }
-        readed += (int64_t)ret;
+#else
+        ssize_t readResult;
+        do {
+            readResult = ::read(input, buffer, sizeof(buffer));
+        } while (readResult < 0 && errno == EINTR);
+        if (readResult < 0) {
+            success = false;
+            break;
+        }
+        const size_t count = static_cast<size_t>(readResult);
+#endif
+        if (count == 0) {
+            break;
+        }
+        if (static_cast<size_t>(count) > MAX_READ - data.size()) {
+            success = false;
+            break;
+        }
+        data.append(buffer, static_cast<size_t>(count));
     }
-    fclose(fp);
-    return (readed == to_read);
+
+#ifdef _WIN32
+    if (!CloseHandle(input)) {
+        success = false;
+    }
+#else
+    if (close(input) != 0) {
+        success = false;
+    }
+#endif
+    if (!success || data.empty()) {
+        data.clear();
+        return false;
+    }
+    return true;
 }
 
 bool jvalue::read_from_file(const char* path, ...) {
@@ -957,22 +1132,7 @@ bool jvalue::read_plist_from_file(const char* path, ...) {
 }
 
 bool jvalue::_write_data_to_file(const char* path, string& data) {
-    FILE* fp = NULL;
-    _fopen64(fp, path, "wb");
-    if (NULL != fp) {
-        size_t written = 0;
-        size_t to_write = data.size();
-        while (written < to_write) {
-            size_t ret = fwrite(data.data() + written, 1, to_write - written, fp);
-            if (ret <= 0) {
-                break;
-            }
-            written += ret;
-        }
-        fclose(fp);
-        return (written == to_write);
-    }
-    return false;
+    return FileSystem::WriteFile(path, data);
 }
 
 bool jvalue::write_to_file(const char* path, ...) {
@@ -1092,7 +1252,13 @@ bool jreader::parse(const char* pdoc, jvalue& root) {
         m_depth = 0;
 
         root.clear();
-        return _read_value(root);
+        if (!_read_value(root)) {
+            return false;
+        }
+        jtoken trailing;
+        _read_token(trailing);
+        return trailing.type == jtoken::E_JTOKEN_END ||
+               _add_error("Unexpected content after root value", trailing.pbegin);
     }
     return false;
 }
@@ -1147,68 +1313,73 @@ bool jreader::_read_value(jvalue& jval) {
 }
 
 bool jreader::_read_token(jtoken& token) {
-    _skip_spaces();
-    token.pbegin = m_pcursor;
-    switch (_get_next_char()) {
-    case '{':
-        token.type = jtoken::E_JTOKEN_OBJECT_BEGIN;
-        break;
-    case '}':
-        token.type = jtoken::E_JTOKEN_OBJECT_END;
-        break;
-    case '[':
-        token.type = jtoken::E_JTOKEN_ARRAY_BEGIN;
-        break;
-    case ']':
-        token.type = jtoken::E_JTOKEN_ARRAY_END;
-        break;
-    case ',':
-        token.type = jtoken::E_JTOKEN_ARRAY_SEPARATOR;
-        break;
-    case ':':
-        token.type = jtoken::E_JTOKEN_MEMBER_SEPARATOR;
-        break;
-    case 0:
-        token.type = jtoken::E_JTOKEN_END;
-        break;
-    case '"':
-        token.type = _read_string() ? jtoken::E_JTOKEN_STRING : jtoken::E_JTOKEN_ERROR;
-        break;
-    case '/':
-    case '#':
-    case ';': {
-        _skip_comment();
-        return _read_token(token);
-    } break;
-    case '0':
-    case '1':
-    case '2':
-    case '3':
-    case '4':
-    case '5':
-    case '6':
-    case '7':
-    case '8':
-    case '9':
-    case '-': {
-        token.type = jtoken::E_JTOKEN_NUMBER;
-        _read_number();
-    } break;
-    case 't':
-        token.type = _match("rue", 3) ? jtoken::E_JTOKEN_TRUE : jtoken::E_JTOKEN_ERROR;
-        break;
-    case 'f':
-        token.type = _match("alse", 4) ? jtoken::E_JTOKEN_FALSE : jtoken::E_JTOKEN_ERROR;
-        break;
-    case 'n':
-        token.type = _match("ull", 3) ? jtoken::E_JTOKEN_NULL : jtoken::E_JTOKEN_ERROR;
-        break;
-    default:
-        token.type = jtoken::E_JTOKEN_ERROR;
-        break;
+    while (true) {
+        _skip_spaces();
+        token.pbegin = m_pcursor;
+        const char first = _get_next_char();
+        if (first == '/' || first == '#' || first == ';') {
+            if (!_skip_comment()) {
+                token.type = jtoken::E_JTOKEN_ERROR;
+                token.pend = m_pcursor;
+                return false;
+            }
+            continue;
+        }
+        switch (first) {
+        case '{':
+            token.type = jtoken::E_JTOKEN_OBJECT_BEGIN;
+            break;
+        case '}':
+            token.type = jtoken::E_JTOKEN_OBJECT_END;
+            break;
+        case '[':
+            token.type = jtoken::E_JTOKEN_ARRAY_BEGIN;
+            break;
+        case ']':
+            token.type = jtoken::E_JTOKEN_ARRAY_END;
+            break;
+        case ',':
+            token.type = jtoken::E_JTOKEN_ARRAY_SEPARATOR;
+            break;
+        case ':':
+            token.type = jtoken::E_JTOKEN_MEMBER_SEPARATOR;
+            break;
+        case 0:
+            token.type = jtoken::E_JTOKEN_END;
+            break;
+        case '"':
+            token.type = _read_string() ? jtoken::E_JTOKEN_STRING : jtoken::E_JTOKEN_ERROR;
+            break;
+        case '0':
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7':
+        case '8':
+        case '9':
+        case '-': {
+            token.type = jtoken::E_JTOKEN_NUMBER;
+            _read_number();
+        } break;
+        case 't':
+            token.type = _match("rue", 3) ? jtoken::E_JTOKEN_TRUE : jtoken::E_JTOKEN_ERROR;
+            break;
+        case 'f':
+            token.type = _match("alse", 4) ? jtoken::E_JTOKEN_FALSE : jtoken::E_JTOKEN_ERROR;
+            break;
+        case 'n':
+            token.type = _match("ull", 3) ? jtoken::E_JTOKEN_NULL : jtoken::E_JTOKEN_ERROR;
+            break;
+        default:
+            token.type = jtoken::E_JTOKEN_ERROR;
+            break;
+        }
+        token.pend = m_pcursor;
+        return true;
     }
-    token.pend = m_pcursor;
-    return true;
 }
 
 void jreader::_skip_spaces() {
@@ -1235,16 +1406,27 @@ bool jreader::_match(const char* pattern, int pattern_length) {
     return true;
 }
 
-void jreader::_skip_comment() {
+bool jreader::_skip_comment() {
+    const char marker = m_pcursor > m_pbegin ? m_pcursor[-1] : '\0';
+    if (marker == '#' || marker == ';') {
+        while (m_pcursor != m_pend) {
+            const char ch = _get_next_char();
+            if (ch == '\r' || ch == '\n') {
+                break;
+            }
+        }
+        return true;
+    }
     char c = _get_next_char();
     if (c == '*') {
         while (m_pcursor != m_pend) {
             char ch = _get_next_char();
             if (ch == '*' && m_pcursor != m_pend && *m_pcursor == '/') {
                 ++m_pcursor; // consume the closing '/'
-                break;
+                return true;
             }
         }
+        return false;
     } else if (c == '/') {
         while (m_pcursor != m_pend) {
             char ch = _get_next_char();
@@ -1252,7 +1434,9 @@ void jreader::_skip_comment() {
                 break;
             }
         }
+        return true;
     }
+    return false;
 }
 
 void jreader::_read_number() {
@@ -1350,6 +1534,9 @@ bool jreader::_read_array(jvalue& jval) {
 }
 
 bool jreader::_decode_number(jtoken& token, jvalue& jval) {
+    if (!IsStrictJsonNumber(token.pbegin, token.pend)) {
+        return _add_error("'" + string(token.pbegin, token.pend) + "' is not a number.", token.pbegin);
+    }
     // Scan for float-indicator characters; on hit, fall through to double parse.
     for (const char* p = token.pbegin; p != token.pend; p++) {
         char c = *p;
@@ -1394,7 +1581,10 @@ bool jreader::_decode_double(jtoken& token, jvalue& jval) {
         ::memcpy(buf, token.pbegin, len);
         buf[len] = 0;
         double val = 0;
-        if (1 == sscanf_s(buf, "%lf", &val)) {
+        char* end = nullptr;
+        errno = 0;
+        val = strtod(buf, &end);
+        if (end == buf + len && errno != ERANGE && std::isfinite(val)) {
             jval = val;
             return true;
         }
@@ -1412,6 +1602,9 @@ bool jreader::_decode_string(jtoken& token, string& strdec) {
         // Bulk copy: scan for next backslash or end
         const char* chunk_start = pcur;
         while (pcur != pend && *pcur != '\\') {
+            if (static_cast<unsigned char>(*pcur) < 0x20U) {
+                return _add_error("Unescaped control character in string", pcur);
+            }
             ++pcur;
         }
         if (pcur != chunk_start) {
@@ -1774,9 +1967,9 @@ string jwriter::d2s(time_t t) {
     tm ft = {0};
 
 #ifdef _WIN32
-    localtime_s(&ft, &t);
+    gmtime_s(&ft, &t);
 #else
-    localtime_r(&t, &ft);
+    gmtime_r(&t, &ft);
 #endif
 
     ft.tm_year = (ft.tm_year < 0) ? 0 : ft.tm_year;
@@ -1991,8 +2184,19 @@ bool jpreader::parse(const char* pdoc, size_t len, jvalue& root, bool* is_binary
         m_depth = 0;
 
         ptoken token;
-        _read_token(token);
-        return _read_value(root, token);
+        if (!_read_token(token) || !_read_value(root, token)) {
+            return false;
+        }
+        _skip_spaces();
+        if (m_pcursor == m_pend) {
+            return true;
+        }
+        ptoken trailing;
+        if (!_read_token(trailing) || trailing.type != ptoken::E_PTOKEN_END) {
+            return _add_error("Unexpected content after root value", m_pcursor);
+        }
+        _skip_spaces();
+        return m_pcursor == m_pend || _add_error("Unexpected content after plist", m_pcursor);
     }
 }
 
@@ -2051,14 +2255,11 @@ bool jpreader::_read_value(jvalue& pval, ptoken& token) {
         break;
     case ptoken::E_PTOKEN_DATE: {
         string strval;
-        _decode_string(token, strval);
-
-        tm ft = {0};
-        ::sscanf_s(strval.c_str(), "%04d-%02d-%02dT%02d:%02d:%02dZ", &ft.tm_year, &ft.tm_mon, &ft.tm_mday, &ft.tm_hour,
-                   &ft.tm_min, &ft.tm_sec);
-        ft.tm_mon -= 1;
-        ft.tm_year -= 1900;
-        pval.assign_date(mktime(&ft));
+        time_t parsed = 0;
+        if (!_decode_string(token, strval) || !ParseUtcDate(strval, parsed)) {
+            return _add_error("Invalid UTC plist date", token.pbegin);
+        }
+        pval.assign_date(parsed);
     } break;
     case ptoken::E_PTOKEN_DATA: {
         string strval;
@@ -2123,13 +2324,19 @@ void jpreader::_end_label(ptoken& token, const char* end_label) {
 
 bool jpreader::_read_token(ptoken& token) {
     string label;
-    if (!_read_label(label)) {
-        token.type = ptoken::E_PTOKEN_ERROR;
-        return false;
-    }
-
-    if ('?' == label.at(1) || '!' == label.at(1)) {
-        return _read_token(token);
+    while (true) {
+        if (!_read_label(label)) {
+            token.type = ptoken::E_PTOKEN_ERROR;
+            return false;
+        }
+        if (label.size() < 2) {
+            token.type = ptoken::E_PTOKEN_ERROR;
+            return false;
+        }
+        if ('?' == label[1] || '!' == label[1] || "<plist>" == label) {
+            continue;
+        }
+        break;
     }
 
     if ("<dict>" == label) {
@@ -2188,8 +2395,6 @@ bool jpreader::_read_token(ptoken& token) {
         token.type = ptoken::E_PTOKEN_REAL_NULL;
     } else if ("<string/>" == label) {
         token.type = ptoken::E_PTOKEN_STRING_NULL;
-    } else if ("<plist>" == label) {
-        return _read_token(token);
     } else if ("</plist>" == label || "<plist/>" == label) {
         token.type = ptoken::E_PTOKEN_END;
     } else {
@@ -2327,7 +2532,10 @@ bool jpreader::_decode_double(ptoken& token, jvalue& pval) {
         ::memcpy(buf, token.pbegin, len);
         buf[len] = 0;
         double val = 0;
-        if (1 == sscanf_s(buf, "%lf", &val)) {
+        char* end = nullptr;
+        errno = 0;
+        val = strtod(buf, &end);
+        if (end == buf + len && errno != ERANGE && std::isfinite(val)) {
             pval = val;
             return true;
         }
@@ -2342,16 +2550,60 @@ bool jpreader::_decode_string(ptoken& token, string& strdec) {
     strdec.reserve(size_t(pend - pcursor));
 
     while (pcursor != pend) {
-        const char* chunk_start = pcursor;
-        while (pcursor != pend && *pcursor != '\n' && *pcursor != '\r' && *pcursor != '\t') {
-            ++pcursor;
+        if (*pcursor != '&') {
+            strdec.push_back(*pcursor++);
+            continue;
         }
-        if (pcursor != chunk_start) {
-            strdec.append(chunk_start, (size_t)(pcursor - chunk_start));
+
+        const char* semicolon = std::find(pcursor + 1, pend, ';');
+        if (semicolon == pend) {
+            return _add_error("Unterminated XML entity", pcursor);
         }
-        if (pcursor != pend) {
-            ++pcursor;
+        const string entity(pcursor + 1, semicolon);
+        if (entity == "amp") {
+            strdec.push_back('&');
+        } else if (entity == "lt") {
+            strdec.push_back('<');
+        } else if (entity == "gt") {
+            strdec.push_back('>');
+        } else if (entity == "quot") {
+            strdec.push_back('"');
+        } else if (entity == "apos") {
+            strdec.push_back('\'');
+        } else if (entity.size() >= 2 && entity[0] == '#') {
+            const bool hexadecimal = entity[1] == 'x' || entity[1] == 'X';
+            const size_t offset = hexadecimal ? 2U : 1U;
+            if (offset == entity.size()) {
+                return _add_error("Invalid numeric XML entity", pcursor);
+            }
+            uint32_t codepoint = 0;
+            for (size_t i = offset; i < entity.size(); ++i) {
+                const char character = entity[i];
+                unsigned digit = 0;
+                if (character >= '0' && character <= '9') {
+                    digit = static_cast<unsigned>(character - '0');
+                } else if (hexadecimal && character >= 'a' && character <= 'f') {
+                    digit = static_cast<unsigned>(character - 'a' + 10);
+                } else if (hexadecimal && character >= 'A' && character <= 'F') {
+                    digit = static_cast<unsigned>(character - 'A' + 10);
+                } else {
+                    return _add_error("Invalid numeric XML entity", pcursor);
+                }
+                const unsigned base = hexadecimal ? 16U : 10U;
+                if (codepoint > (0x10FFFFU - digit) / base) {
+                    return _add_error("XML entity out of range", pcursor);
+                }
+                codepoint = codepoint * base + digit;
+            }
+            if (codepoint == 0 || codepoint > 0x10FFFFU || (codepoint >= 0xD800U && codepoint <= 0xDFFFU) ||
+                (codepoint < 0x20U && codepoint != 0x09U && codepoint != 0x0AU && codepoint != 0x0DU)) {
+                return _add_error("Invalid XML character", pcursor);
+            }
+            AppendUtf8(strdec, codepoint);
+        } else {
+            return _add_error("Unknown XML entity", pcursor);
         }
+        pcursor = semicolon + 1;
     }
     return true;
 }
@@ -2446,7 +2698,7 @@ bool jpreader::_read_unicode(const char* pcursor, size_t size, jvalue& pv) {
     if (!_bp_in_bounds(pcursor, byte_len)) {
         return false;
     }
-    // UTF-16 -> UTF-8: worst case 3 bytes per code unit (we don't combine surrogates here).
+    // UTF-16 -> UTF-8 never expands beyond three bytes per code unit.
     if (size > (SIZE_MAX / 3 - 1)) {
         return false;
     }
@@ -2456,16 +2708,21 @@ bool jpreader::_read_unicode(const char* pcursor, size_t size, jvalue& pv) {
     const uint8_t* src = (const uint8_t*)pcursor;
     for (size_t i = 0; i < size; ++i) {
         uint16_t wc = (uint16_t)((src[2 * i] << 8) | src[2 * i + 1]);
-        if (wc >= 0x800) {
-            out += (char)(0xE0 | ((wc >> 12) & 0x0F));
-            out += (char)(0x80 | ((wc >> 6) & 0x3F));
-            out += (char)(0x80 | (wc & 0x3F));
-        } else if (wc >= 0x80) {
-            out += (char)(0xC0 | ((wc >> 6) & 0x1F));
-            out += (char)(0x80 | (wc & 0x3F));
-        } else {
-            out += (char)(wc & 0x7F);
+        uint32_t codepoint = wc;
+        if (wc >= 0xD800U && wc <= 0xDBFFU) {
+            if (i + 1 >= size) {
+                return false;
+            }
+            const uint16_t low = (uint16_t)((src[2 * (i + 1)] << 8) | src[2 * (i + 1) + 1]);
+            if (low < 0xDC00U || low > 0xDFFFU) {
+                return false;
+            }
+            codepoint = 0x10000U + ((wc - 0xD800U) << 10U) + (low - 0xDC00U);
+            ++i;
+        } else if (wc >= 0xDC00U && wc <= 0xDFFFU) {
+            return false;
         }
+        AppendUtf8(out, codepoint);
     }
     pv = out.c_str();
     return true;

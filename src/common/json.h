@@ -545,7 +545,7 @@ class jreader {
     };
 
     void _skip_spaces();
-    void _skip_comment();
+    bool _skip_comment();
 
     bool _match(const char* pattern, int pattern_length);
 

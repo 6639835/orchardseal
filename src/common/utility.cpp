@@ -1,5 +1,9 @@
 #include "utility.h"
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+
 #ifdef _WIN32
 #define PRId64 "lld"
 #elif __APPLE__
@@ -41,30 +45,124 @@ time_t Utility::GetUnixStamp() {
 
 uint64_t Utility::GetMicroSecond() {
 #ifdef _WIN32
-    LARGE_INTEGER frequency, counter;
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&counter);
-    return (counter.QuadPart * 1000000) / frequency.QuadPart;
+    static const LONGLONG frequency = []() {
+        LARGE_INTEGER value{};
+        return QueryPerformanceFrequency(&value) && value.QuadPart > 0 ? value.QuadPart : 0;
+    }();
+    LARGE_INTEGER counter{};
+    if (frequency == 0 || !QueryPerformanceCounter(&counter) || counter.QuadPart < 0) {
+        return 0;
+    }
+    const uint64_t ticks = static_cast<uint64_t>(counter.QuadPart);
+    const uint64_t divisor = static_cast<uint64_t>(frequency);
+    return (ticks / divisor) * UINT64_C(1000000) + ((ticks % divisor) * UINT64_C(1000000)) / divisor;
 #else
-    struct timeval tv = {0};
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec * 1000000 + tv.tv_usec;
+    struct timespec value{};
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0 || value.tv_sec < 0 || value.tv_nsec < 0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(value.tv_sec) * UINT64_C(1000000) +
+           static_cast<uint64_t>(value.tv_nsec) / UINT64_C(1000);
 #endif
 }
 
-bool Utility::SystemExecV(const char* szCmd, ...) {
-    FORMAT_V(szCmd, szRealCmd);
-
-    if (strlen(szRealCmd) <= 0) {
+bool Utility::SystemExec(const vector<string>& arguments) {
+    if (arguments.empty() || arguments.front().empty()) {
         return false;
     }
+#ifdef _WIN32
+    const auto utf8ToWide = [](const string& input, std::wstring& output) {
+        if (input.empty()) {
+            output.clear();
+            return true;
+        }
+        const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
+                                              static_cast<int>(input.size()), nullptr, 0);
+        if (count <= 0) {
+            return false;
+        }
+        output.resize(static_cast<size_t>(count));
+        return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(), static_cast<int>(input.size()),
+                                   output.data(), count) == count;
+    };
+    const auto quote = [](const std::wstring& argument) {
+        if (argument.empty()) {
+            return std::wstring(L"\"\"");
+        }
+        if (argument.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
+            return argument;
+        }
+        std::wstring result(1, L'"');
+        size_t backslashes = 0;
+        for (const wchar_t character : argument) {
+            if (character == L'\\') {
+                ++backslashes;
+            } else if (character == L'"') {
+                result.append(backslashes * 2 + 1, L'\\');
+                result.push_back(L'"');
+                backslashes = 0;
+            } else {
+                result.append(backslashes, L'\\');
+                backslashes = 0;
+                result.push_back(character);
+            }
+        }
+        result.append(backslashes * 2, L'\\');
+        result.push_back(L'"');
+        return result;
+    };
 
-    int status = system(szRealCmd);
-    if (0 != status) {
-        Logger::ErrorV("SystemExec: \"%s\", error!\n", szRealCmd);
+    std::wstring commandLine;
+    for (const string& argument : arguments) {
+        std::wstring wideArgument;
+        if (!utf8ToWide(argument, wideArgument)) {
+            return false;
+        }
+        if (!commandLine.empty()) {
+            commandLine.push_back(L' ');
+        }
+        commandLine += quote(wideArgument);
+    }
+    vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
+    mutableCommand.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup,
+                        &process)) {
         return false;
     }
-    return true;
+    CloseHandle(process.hThread);
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    const bool success =
+        waitResult == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exitCode) && exitCode == 0;
+    CloseHandle(process.hProcess);
+    return success;
+#else
+    vector<char*> argv;
+    argv.reserve(arguments.size() + 1);
+    for (const string& argument : arguments) {
+        argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    const pid_t child = fork();
+    if (child < 0) {
+        return false;
+    }
+    if (child == 0) {
+        execvp(argv[0], argv.data());
+        _exit(127);
+    }
+
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
 }
 
 uint16_t Utility::Swap(uint16_t value) {

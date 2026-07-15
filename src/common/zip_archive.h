@@ -12,7 +12,8 @@ class ZipArchive final {
     using EntryCallback = std::function<bool(void* archive, bool directory, const std::string& path)>;
 
     static bool EnumerateEntries(const char* archiveFile, const EntryCallback& callback);
-    static bool ExtractEntry(void* archive, const std::string& path, const std::string& outputFolder);
+    static bool ExtractEntry(void* archive, const std::string& path, const std::string& outputFolder,
+                             std::uint64_t expectedSize, std::uint64_t& totalWritten, unsigned int mode);
     static bool ExtractEntries(const char* archiveFile, const char* outputFolder);
     static bool AddFile(void* archive, const std::string& sourceFile, const std::string& relativePath,
                         int compressionLevel);

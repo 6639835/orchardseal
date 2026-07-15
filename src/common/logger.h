@@ -16,6 +16,12 @@ class Logger {
     static void PrintV(const char* szFormat, ...);
     static void Debug(const char* szLog);
     static void DebugV(const char* szFormat, ...);
+    static void Diagnostic(const char* szLog);
+    static void DiagnosticV(const char* szFormat, ...);
+    static void Report(const char* utf8Text);
+    static void ReportV(const char* utf8Format, ...);
+    static void ReportError(const char* utf8Text);
+    static void ReportErrorV(const char* utf8Format, ...);
     static bool Warn(const char* szLog);
     static bool WarnV(const char* szFormat, ...);
     static bool Error(const char* szLog);
@@ -31,6 +37,7 @@ class Logger {
     }
 
   private:
-    static void _Print(const char* szLog, int nColor = 0);
+    static void _Print(const char* szLog, int nColor = 0, bool toStandardError = false);
+    static void _Write(const char* szLog, int nColor, bool toStandardError);
     static int g_nLogLevel;
 };

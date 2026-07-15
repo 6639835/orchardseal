@@ -1,6 +1,13 @@
 #include "file_system.h"
 
+#include <filesystem>
 #include <limits>
+
+#if defined(__APPLE__)
+#include <sys/stdio.h>
+#elif defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 #if !defined(S_ISREG) && defined(S_IFMT) && defined(S_IFREG)
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
@@ -8,9 +15,82 @@
 
 map<void*, void*> FileSystem::s_mapFiles;
 
+#ifdef _WIN32
+namespace {
+    bool Utf8ToWide(const char* input, std::wstring& output) {
+        output.clear();
+        if (input == nullptr || *input == '\0') {
+            return false;
+        }
+        const int length = static_cast<int>(strlen(input));
+        const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input, length, nullptr, 0);
+        if (count <= 0) {
+            return false;
+        }
+        output.resize(static_cast<size_t>(count));
+        return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input, length, output.data(), count) == count;
+    }
+
+    bool WideToUtf8(const wchar_t* input, std::string& output) {
+        output.clear();
+        if (input == nullptr) {
+            return false;
+        }
+        const int length = static_cast<int>(wcslen(input));
+        if (length == 0) {
+            return true;
+        }
+        const int count =
+            WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, input, length, nullptr, 0, nullptr, nullptr);
+        if (count <= 0) {
+            return false;
+        }
+        output.resize(static_cast<size_t>(count));
+        return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, input, length, output.data(), count, nullptr,
+                                   nullptr) == count;
+    }
+
+    FILE* OpenFileUtf8(const char* path, const wchar_t* mode) {
+        std::wstring widePath;
+        if (!Utf8ToWide(path, widePath)) {
+            return nullptr;
+        }
+        FILE* result = nullptr;
+        return _wfopen_s(&result, widePath.c_str(), mode) == 0 ? result : nullptr;
+    }
+
+    bool IsDirectoryTreeSafe(const std::wstring& path) {
+        std::filesystem::path current(path);
+        while (!current.empty()) {
+            const DWORD attributes = GetFileAttributesW(current.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES &&
+                ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)) {
+                return false;
+            }
+            const std::filesystem::path parent = current.parent_path();
+            if (parent == current) {
+                break;
+            }
+            current = parent;
+        }
+        return true;
+    }
+} // namespace
+#endif
+
 bool FileSystem::IsRegularFile(const char* path) {
+#ifdef _WIN32
+    std::wstring widePath;
+    if (!Utf8ToWide(path, widePath)) {
+        return false;
+    }
+    const DWORD attributes = GetFileAttributesW(widePath.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+#else
     struct stat st = {0};
-    return 0 == stat(path, &st) && S_ISREG(st.st_mode);
+    return path != nullptr && 0 == lstat(path, &st) && S_ISREG(st.st_mode);
+#endif
 }
 
 void* FileSystem::MapFile(const char* path, size_t offset, size_t size, size_t* mappedSize, bool readOnly) {
@@ -24,8 +104,20 @@ void* FileSystem::MapFile(const char* path, size_t offset, size_t size, size_t* 
 #ifdef _WIN32
     const DWORD access = readOnly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
     const DWORD sharing = readOnly ? FILE_SHARE_READ : (FILE_SHARE_READ | FILE_SHARE_WRITE);
-    HANDLE file = ::CreateFileA(path, access, sharing, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    std::wstring widePath;
+    if (!Utf8ToWide(path, widePath)) {
+        return nullptr;
+    }
+    HANDLE file = ::CreateFileW(widePath.c_str(), access, sharing, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+
+    BY_HANDLE_FILE_INFORMATION information{};
+    if (GetFileType(file) != FILE_TYPE_DISK || !GetFileInformationByHandle(file, &information) ||
+        (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        ::CloseHandle(file);
         return nullptr;
     }
 
@@ -67,13 +159,17 @@ void* FileSystem::MapFile(const char* path, size_t offset, size_t size, size_t* 
 
     s_mapFiles[base] = mapping;
 #else
-    const int descriptor = open(path, readOnly ? O_RDONLY : O_RDWR);
+    const int descriptor = open(path, (readOnly ? O_RDONLY : O_RDWR)
+#ifdef O_NOFOLLOW
+                                          | O_NOFOLLOW
+#endif
+    );
     if (descriptor < 0) {
         return nullptr;
     }
 
     struct stat fileStatus{};
-    if (fstat(descriptor, &fileStatus) != 0 || fileStatus.st_size < 0 ||
+    if (fstat(descriptor, &fileStatus) != 0 || !S_ISREG(fileStatus.st_mode) || fileStatus.st_size < 0 ||
         static_cast<uint64_t>(offset) > static_cast<uint64_t>(fileStatus.st_size)) {
         close(descriptor);
         return nullptr;
@@ -127,7 +223,11 @@ bool FileSystem::WriteFile(const char* szFile, const char* szData, size_t sLen) 
     }
 
     FILE* fp = NULL;
+#ifdef _WIN32
+    fp = OpenFileUtf8(szFile, L"wb");
+#else
     _fopen64(fp, szFile, "wb");
+#endif
     if (NULL != fp) {
         size_t written = 0;
         size_t to_write = sLen;
@@ -169,7 +269,11 @@ bool FileSystem::ReadFile(const char* szFile, string& strData) {
     }
 
     FILE* fp = NULL;
+#ifdef _WIN32
+    fp = OpenFileUtf8(szFile, L"rb");
+#else
     _fopen64(fp, szFile, "rb");
+#endif
     if (NULL != fp) {
         if (0 != _fseeki64(fp, 0, SEEK_END)) {
             fclose(fp);
@@ -208,7 +312,11 @@ bool FileSystem::ReadFileV(string& strData, const char* szPath, ...) {
 
 bool FileSystem::AppendFile(const char* szFile, const char* szData, size_t sLen) {
     FILE* fp = NULL;
+#ifdef _WIN32
+    fp = OpenFileUtf8(szFile, L"ab+");
+#else
     _fopen64(fp, szFile, "ab+");
+#endif
     if (NULL != fp) {
         int64_t towrite = sLen;
         while (towrite > 0) {
@@ -233,7 +341,13 @@ bool FileSystem::AppendFile(const char* szFile, const string& strData) {
 
 bool FileSystem::IsFolder(const char* szFolder) {
 #ifdef _WIN32
-    return ::PathIsDirectoryA(szFolder);
+    std::wstring widePath;
+    if (!Utf8ToWide(szFolder, widePath)) {
+        return false;
+    }
+    const DWORD attributes = GetFileAttributesW(widePath.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 #else
     struct stat st = {0};
     return 0 == stat(szFolder, &st) && S_ISDIR(st.st_mode);
@@ -246,14 +360,25 @@ bool FileSystem::IsFolderV(const char* szPath, ...) {
 }
 
 bool FileSystem::CreateFolder(const char* szFolder) {
+    if (szFolder == nullptr || *szFolder == '\0') {
+        return false;
+    }
     string strPath = GetFullPath(szFolder);
-    if (!IsFolder(strPath.c_str())) {
 #ifdef _WIN32
-        int32_t nRet = ::SHCreateDirectoryExA(NULL, strPath.c_str(), NULL);
-        if (ERROR_SUCCESS != nRet && ERROR_ALREADY_EXISTS != nRet) {
-            return false;
-        }
+    std::wstring widePath;
+    if (!Utf8ToWide(strPath.c_str(), widePath) || !IsDirectoryTreeSafe(widePath)) {
+        return false;
+    }
+    std::error_code createError;
+    std::filesystem::create_directories(std::filesystem::path(widePath), createError);
+    if (createError || !IsDirectoryTreeSafe(widePath)) {
+        return false;
+    }
+    const DWORD attributes = GetFileAttributesW(widePath.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 #else
+    if (!IsFolder(strPath.c_str())) {
         size_t pos = 0;
         pos = strPath.find('/', pos);
         while (string::npos != pos) {
@@ -261,6 +386,10 @@ bool FileSystem::CreateFolder(const char* szFolder) {
             if (!strFolder.empty()) {
                 if (0 != mkdir(strFolder.c_str(), 0755)) {
                     if (EEXIST != errno) {
+                        return false;
+                    }
+                    struct stat status{};
+                    if (stat(strFolder.c_str(), &status) != 0 || !S_ISDIR(status.st_mode)) {
                         return false;
                     }
                 }
@@ -271,11 +400,15 @@ bool FileSystem::CreateFolder(const char* szFolder) {
             if (EEXIST != errno) {
                 return false;
             }
+            struct stat status{};
+            if (stat(strPath.c_str(), &status) != 0 || !S_ISDIR(status.st_mode)) {
+                return false;
+            }
         }
         return true;
-#endif
     }
     return true;
+#endif
 }
 
 bool FileSystem::CreateFolderV(const char* szPath, ...) {
@@ -296,22 +429,29 @@ bool FileSystem::RemoveFolder(const char* szFolder) {
         return false;
     }
 
-    if (!IsFolder(szFolder)) {
-        RemoveFile(szFolder);
-        return true;
-    }
 #ifdef _WIN32
-    string strFolder = szFolder;
-    strFolder.push_back('\0');
-
-    SHFILEOPSTRUCTA shfs;
-    memset(&shfs, 0, sizeof(shfs));
-    shfs.wFunc = FO_DELETE;
-    shfs.pFrom = strFolder.c_str();
-    shfs.fFlags = FOF_NOCONFIRMATION;
-    shfs.fFlags |= (FOF_SILENT | FOF_NOERRORUI);
-    return (0 == ::SHFileOperationA(&shfs));
+    std::wstring strFolder;
+    if (!Utf8ToWide(szFolder, strFolder)) {
+        return false;
+    }
+    const DWORD attributes = GetFileAttributesW(strFolder.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ? RemoveDirectoryW(strFolder.c_str()) != 0
+                                                            : DeleteFileW(strFolder.c_str()) != 0;
+    }
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return DeleteFileW(strFolder.c_str()) != 0;
+    }
+    std::error_code removeError;
+    const std::uintmax_t removed = std::filesystem::remove_all(std::filesystem::path(strFolder), removeError);
+    return !removeError && removed > 0;
 #else
+    if (!IsFolder(szFolder)) {
+        return RemoveFile(szFolder);
+    }
     return (0 == nftw(szFolder, RemoveFolderCallBack, 64, FTW_DEPTH | FTW_PHYS));
 #endif
 }
@@ -322,7 +462,12 @@ bool FileSystem::RemoveFolderV(const char* szPath, ...) {
 }
 
 bool FileSystem::RemoveFile(const char* szFile) {
+#ifdef _WIN32
+    std::wstring widePath;
+    return Utf8ToWide(szFile, widePath) && DeleteFileW(widePath.c_str()) != 0;
+#else
     return (NULL != szFile && 0 == remove(szFile));
+#endif
 }
 
 bool FileSystem::RemoveFileV(const char* szPath, ...) {
@@ -336,7 +481,8 @@ bool FileSystem::IsFileExists(const char* szFile) {
     }
 
 #ifdef _WIN32
-    return ::PathFileExistsA(szFile);
+    std::wstring widePath;
+    return Utf8ToWide(szFile, widePath) && GetFileAttributesW(widePath.c_str()) != INVALID_FILE_ATTRIBUTES;
 #else
     return (0 == access(szFile, F_OK));
 #endif
@@ -350,7 +496,11 @@ bool FileSystem::IsFileExistsV(const char* szPath, ...) {
 bool FileSystem::IsZipFile(const char* szFile) {
     if (NULL != szFile && !IsFolder(szFile)) {
         FILE* fp = NULL;
+#ifdef _WIN32
+        fp = OpenFileUtf8(szFile, L"rb");
+#else
         _fopen64(fp, szFile, "rb");
+#endif
         if (NULL != fp) {
             uint8_t buf[2] = {0};
             const size_t bytesRead = fread(buf, 1, sizeof(buf), fp);
@@ -367,7 +517,10 @@ bool FileSystem::CopyFile(const char* szSrcFile, const char* szDestFile) {
     }
 
 #ifdef _WIN32
-    return ::CopyFileA(szSrcFile, szDestFile, FALSE) ? true : false;
+    std::wstring wideSource;
+    std::wstring wideDestination;
+    return Utf8ToWide(szSrcFile, wideSource) && Utf8ToWide(szDestFile, wideDestination) &&
+           ::CopyFileW(wideSource.c_str(), wideDestination.c_str(), FALSE) != 0;
 #else
 
     int src_id = open(szSrcFile, O_RDONLY);
@@ -415,6 +568,37 @@ bool FileSystem::CopyFileV(const char* szSrcFile, const char* szDestPath, ...) {
     return CopyFile(szSrcFile, szDestFile);
 }
 
+bool FileSystem::Rename(const char* source, const char* destination, bool replaceExisting) {
+    if (source == nullptr || destination == nullptr || *source == '\0' || *destination == '\0') {
+        return false;
+    }
+#ifdef _WIN32
+    std::wstring wideSource;
+    std::wstring wideDestination;
+    if (!Utf8ToWide(source, wideSource) || !Utf8ToWide(destination, wideDestination)) {
+        return false;
+    }
+    DWORD flags = MOVEFILE_WRITE_THROUGH;
+    if (replaceExisting) {
+        flags |= MOVEFILE_REPLACE_EXISTING;
+    }
+    return MoveFileExW(wideSource.c_str(), wideDestination.c_str(), flags) != 0;
+#else
+    if (replaceExisting) {
+        return ::rename(source, destination) == 0;
+    }
+#if defined(__APPLE__)
+    return ::renamex_np(source, destination, RENAME_EXCL) == 0;
+#elif defined(__linux__) && defined(SYS_renameat2)
+    constexpr unsigned int kRenameNoReplace = 1U;
+    return syscall(SYS_renameat2, AT_FDCWD, source, AT_FDCWD, destination, kRenameNoReplace) == 0;
+#else
+    errno = ENOTSUP;
+    return false;
+#endif
+#endif
+}
+
 string FileSystem::GetFullPath(const char* szPath) {
     if (NULL == szPath) {
         return string();
@@ -423,9 +607,15 @@ string FileSystem::GetFullPath(const char* szPath) {
     string strPath = szPath;
     if (!strPath.empty()) {
 #ifdef _WIN32
-        char path[PATH_MAX] = {0};
-        if (NULL != _fullpath(path, szPath, PATH_MAX)) {
-            strPath = path;
+        std::wstring widePath;
+        if (Utf8ToWide(szPath, widePath)) {
+            const DWORD count = GetFullPathNameW(widePath.c_str(), 0, nullptr, nullptr);
+            if (count > 0) {
+                std::vector<wchar_t> fullPath(static_cast<size_t>(count));
+                if (GetFullPathNameW(widePath.c_str(), count, fullPath.data(), nullptr) != 0) {
+                    WideToUtf8(fullPath.data(), strPath);
+                }
+            }
         }
         Utility::StringReplace(strPath, "/", "\\");
 #else
@@ -457,7 +647,11 @@ int64_t FileSystem::GetFileSize(FILE* fp) {
 int64_t FileSystem::GetFileSize(const char* szPath) {
     int64_t size = 0;
     FILE* fp = NULL;
+#ifdef _WIN32
+    fp = OpenFileUtf8(szPath, L"rb");
+#else
     _fopen64(fp, szPath, "rb");
+#endif
     if (NULL != fp) {
         size = GetFileSize(fp);
         fclose(fp);
@@ -490,9 +684,9 @@ const char* FileSystem::GetTempFolder() {
     if (s_strTempFolder.empty()) {
         call_once(s_flag, [&]() {
 #ifdef _WIN32
-            char szTempPath[PATH_MAX] = {0};
-            if (0 != ::GetTempPathA(PATH_MAX, szTempPath)) {
-                s_strTempFolder = szTempPath;
+            wchar_t szTempPath[PATH_MAX] = {0};
+            if (0 != ::GetTempPathW(PATH_MAX, szTempPath)) {
+                WideToUtf8(szTempPath, s_strTempFolder);
             } else {
                 s_strTempFolder = GetFullPath("./");
             }
@@ -509,27 +703,36 @@ const char* FileSystem::GetTempFolder() {
 
 bool FileSystem::EnumFolder(const char* szFolder, bool bRecursive, enum_folder_callback filter,
                             enum_folder_callback callback) {
-    string strFolder = szFolder;
+    string strFolder = szFolder == nullptr ? "" : szFolder;
     if (strFolder.empty() || NULL == callback) {
         return false;
     }
 
 #ifdef _WIN32
     string strFromFolder = strFolder + "\\*";
-    WIN32_FIND_DATAA fd = {0};
-    HANDLE hFind = ::FindFirstFileA(strFromFolder.c_str(), &fd);
+    std::wstring widePattern;
+    if (!Utf8ToWide(strFromFolder.c_str(), widePattern)) {
+        return false;
+    }
+    WIN32_FIND_DATAW fd = {0};
+    HANDLE hFind = ::FindFirstFileW(widePattern.c_str(), &fd);
     if (INVALID_HANDLE_VALUE == hFind) {
         return false;
     }
 
     do {
-        if (0 == strcmp(fd.cFileName, ".") || 0 == strcmp(fd.cFileName, "..")) {
+        if (0 == wcscmp(fd.cFileName, L".") || 0 == wcscmp(fd.cFileName, L"..")) {
             continue;
         }
 
-        string strName = fd.cFileName;
+        string strName;
+        if (!WideToUtf8(fd.cFileName, strName)) {
+            ::FindClose(hFind);
+            return false;
+        }
         string strPath = strFolder + "\\" + strName;
-        bool bFolder = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? true : false;
+        const bool reparsePoint = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        bool bFolder = !reparsePoint && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
         if (NULL != filter) {
             if (filter(bFolder, strPath)) {
@@ -538,14 +741,22 @@ bool FileSystem::EnumFolder(const char* szFolder, bool bRecursive, enum_folder_c
         }
 
         if (callback(bFolder, strPath)) {
-            break;
+            ::FindClose(hFind);
+            return false;
         }
 
         if (bFolder && bRecursive) {
-            EnumFolder(strPath.c_str(), bRecursive, filter, callback);
+            if (!EnumFolder(strPath.c_str(), bRecursive, filter, callback)) {
+                ::FindClose(hFind);
+                return false;
+            }
         }
-    } while (::FindNextFileA(hFind, &fd));
+    } while (::FindNextFileW(hFind, &fd));
+    const DWORD findError = ::GetLastError();
     ::FindClose(hFind);
+    if (findError != ERROR_NO_MORE_FILES) {
+        return false;
+    }
 
 #else
 
@@ -554,43 +765,52 @@ bool FileSystem::EnumFolder(const char* szFolder, bool bRecursive, enum_folder_c
         return false;
     }
 
+    errno = 0;
     dirent* ptr = readdir(dir);
     while (NULL != ptr) {
         if (0 == strcmp(ptr->d_name, ".") || 0 == strcmp(ptr->d_name, "..")) {
+            errno = 0;
             ptr = readdir(dir);
             continue;
         }
 
         string strPath = strFolder + "/" + ptr->d_name;
 
-        bool bFolder = false;
-        if (DT_DIR == ptr->d_type) {
-            bFolder = true;
-        } else if (DT_UNKNOWN == ptr->d_type) {
-            struct stat st = {0};
-            if (0 == stat(strPath.c_str(), &st) && S_ISDIR(st.st_mode)) {
-                bFolder = true;
-            }
+        struct stat st{};
+        if (lstat(strPath.c_str(), &st) != 0) {
+            closedir(dir);
+            return false;
         }
+        const bool bFolder = S_ISDIR(st.st_mode);
 
         if (NULL != filter) {
             if (filter(bFolder, strPath)) {
+                errno = 0;
                 ptr = readdir(dir);
                 continue;
             }
         }
 
         if (callback(bFolder, strPath)) {
-            break;
+            closedir(dir);
+            return false;
         }
 
         if (bFolder && bRecursive) {
-            EnumFolder(strPath.c_str(), bRecursive, filter, callback);
+            if (!EnumFolder(strPath.c_str(), bRecursive, filter, callback)) {
+                closedir(dir);
+                return false;
+            }
         }
 
+        errno = 0;
         ptr = readdir(dir);
     }
+    const int readError = errno;
     closedir(dir);
+    if (readError != 0) {
+        return false;
+    }
 
 #endif
 

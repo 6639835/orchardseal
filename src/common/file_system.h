@@ -31,6 +31,7 @@ class FileSystem {
     static bool IsZipFile(const char* szFile);
     static bool CopyFile(const char* szSrcFile, const char* szDestFile);
     static bool CopyFileV(const char* szSrcFile, const char* szDestPath, ...);
+    static bool Rename(const char* szSource, const char* szDestination, bool replaceExisting = false);
     static string GetFullPath(const char* szPath);
     static string GetRealPathV(const char* szPath, ...);
     static void* MapFile(const char* path, size_t offset, size_t size, size_t* psize, bool ro);
