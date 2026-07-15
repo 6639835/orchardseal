@@ -6,6 +6,8 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Security
 
 - Hardened archive, Mach-O, signature, certificate, process-launch, and release
