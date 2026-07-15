@@ -49,7 +49,7 @@ bool CodeSignature::_DERChecked(const jvalue& data, string& strOutput) {
     if (data.is_bool()) {
         strOutput.append(1, 0x01);
         strOutput.append(1, 1);
-        strOutput.append(1, data.as_bool() ? (char)0xff : (char)0x00);
+        strOutput.append(1, data.as_bool() ? static_cast<char>(-1) : static_cast<char>(0));
     } else if (data.is_int()) {
         const int64_t value = data.as_int64();
         uint64_t bits = static_cast<uint64_t>(value);
@@ -110,7 +110,7 @@ bool CodeSignature::_DERChecked(const jvalue& data, string& strOutput) {
             strDict += strEntry;
         }
 
-        strOutput.append(1, (char)0xb0);
+        strOutput.append(1, static_cast<char>(-80));
         _DERLength(strOutput, strDict.size());
         strOutput += strDict;
     } else {
@@ -288,14 +288,14 @@ bool CodeSignature::SlotBuildRequirements(const string& strBundleID, const strin
     uint32_t totalLen = outerHeaderLen + reqBlobLen;
 
     // Outer: CSMAGIC_REQUIREMENTS header
-    appendBE32(CSMAGIC_REQUIREMENTS);
+    appendBE32(static_cast<uint32_t>(CSMAGIC_REQUIREMENTS));
     appendBE32(totalLen);
     appendBE32(1);                             // count = 1
     appendBE32(kSecDesignatedRequirementType); // type = 3
     appendBE32(outerHeaderLen);                // offset to inner blob
 
     // Inner: CSMAGIC_REQUIREMENT blob
-    appendBE32(CSMAGIC_REQUIREMENT);
+    appendBE32(static_cast<uint32_t>(CSMAGIC_REQUIREMENT));
     appendBE32(reqBlobLen);
     strOutput.append(strExpr.data(), strExpr.size());
 

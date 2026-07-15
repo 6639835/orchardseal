@@ -5,6 +5,8 @@
 #include "sys/stat.h"
 #include "sys/types.h"
 
+#include <cstring>
+
 static bool StartsWith(const string& str, const char* prefix) {
     return 0 == str.compare(0, strlen(prefix), prefix);
 }

@@ -448,7 +448,7 @@ struct dylib_command {
 
 //////CodeSignature
 
-enum eCSFLAGS {
+enum eCSFLAGS : uint32_t {
     CSMAGIC_REQUIREMENT = 0xfade0c00,               /* single Requirement blob */
     CSMAGIC_REQUIREMENTS = 0xfade0c01,              /* Requirements vector (internal requirements) */
     CSMAGIC_CODEDIRECTORY = 0xfade0c02,             /* CodeDirectory blob */

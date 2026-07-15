@@ -204,6 +204,7 @@ void* FileSystem::MapFile(const char* path, size_t offset, size_t size, size_t* 
 
 bool FileSystem::UnmapFile(void* base, size_t size) {
 #ifdef _WIN32
+    static_cast<void>(size);
     auto it = s_mapFiles.find(base);
     if (it != s_mapFiles.end()) {
         ::UnmapViewOfFile(base);
@@ -417,6 +418,9 @@ bool FileSystem::CreateFolderV(const char* szPath, ...) {
 }
 
 int FileSystem::RemoveFolderCallBack(const char* fpath, const struct stat* sb, int typeflag, struct FTW* ftwbuf) {
+    static_cast<void>(sb);
+    static_cast<void>(typeflag);
+    static_cast<void>(ftwbuf);
     int ret = remove(fpath);
     if (ret) {
         perror(fpath);

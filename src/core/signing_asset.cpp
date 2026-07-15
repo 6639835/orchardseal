@@ -501,6 +501,7 @@ static bool StackContainsIssuerOf(STACK_OF(X509) * certs, X509* cert) {
 bool SigningAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHashData, const string& strCDHashesPlist,
                                const string& strCodeDirectorySlotSHA1, const string& strAltnateCodeDirectorySlot256,
                                string& strCMSOutput) {
+    static_cast<void>(strCodeDirectorySlotSHA1);
     if (!pscert || !pspkey) {
         return CMSError();
     }
@@ -923,13 +924,13 @@ bool SigningAsset::GetCMSInfo(uint8_t* pCMSData, uint32_t uCMSLength, jvalue& jv
                 continue;
             }
 
-            const ASN1_OBJECT* obj = X509_ATTRIBUTE_get0_object(attr);
-            if (!obj) {
+            const ASN1_OBJECT* attributeObject = X509_ATTRIBUTE_get0_object(attr);
+            if (!attributeObject) {
                 continue;
             }
 
             char txtobj[128] = {0};
-            OBJ_obj2txt(txtobj, 128, obj, 1);
+            OBJ_obj2txt(txtobj, 128, attributeObject, 1);
 
             if (0 == strcmp("1.2.840.113549.1.9.3", txtobj)) { // V_ASN1_OBJECT
                 const ASN1_TYPE* av = X509_ATTRIBUTE_get0_type(attr, 0);

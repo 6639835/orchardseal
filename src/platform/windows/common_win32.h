@@ -31,7 +31,6 @@
 #include "getopt.h"
 
 #define PATH_MAX 4096
-#define strerror(x) #x
 #define _fopen64(fp, path, mode)                                                                                       \
     {                                                                                                                  \
         fopen_s(&fp, path, mode);                                                                                      \

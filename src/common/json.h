@@ -23,7 +23,8 @@ typedef unsigned long ulong;
 
 #include <vector>
 #include <string>
-using namespace std;
+using std::string;
+using std::vector;
 
 class jvalue {
     class flat_map;

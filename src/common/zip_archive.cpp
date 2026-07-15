@@ -618,6 +618,9 @@ bool ZipArchive::EnumerateEntries(const char* archiveFile, const EntryCallback& 
 
 bool ZipArchive::ExtractEntry(void* archive, const std::string& path, const std::string& outputFolder,
                               std::uint64_t expectedSize, std::uint64_t& totalWritten, unsigned int mode) {
+#ifdef _WIN32
+    static_cast<void>(mode);
+#endif
     const std::string outputFile = outputFolder + "/" + path;
     std::string parentDirectory = outputFile;
     if (!FileSystem::PathRemoveFileSpec(parentDirectory) || !FileSystem::CreateFolder(parentDirectory.c_str())) {
