@@ -47,7 +47,10 @@ scripts/package.sh X.Y.Z
 ```
 
 The packager uses a source allowlist, rejects credential-like tracked files, and
-never includes ignored or untracked data. Inspect the archive before tagging.
+never includes ignored or untracked data. It compiles the repository-owned
+deterministic gzip writer with the configured `CXX` compiler (or `c++`) so GNU,
+BSD, and other gzip implementations cannot change release bytes. Inspect the
+archive before tagging.
 
 ## 4. Tag and publish
 

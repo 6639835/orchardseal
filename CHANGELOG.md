@@ -6,6 +6,16 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.3.1]
+
+### Fixed
+
+- Restored warnings-as-errors builds across GCC, Clang, and MSVC by making
+  standard-library dependencies and cross-platform conversions explicit.
+- Migrated SHA-1 and SHA-256 operations to OpenSSL's supported EVP interface.
+- Made source archive bytes independent of the host gzip implementation while
+  preserving standard `.tar.gz` compatibility.
+
 ## [0.3.0]
 
 ### Security
